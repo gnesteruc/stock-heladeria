@@ -207,9 +207,9 @@ function pesoVigente(p, fecha) {
 function aBase(p, cantidad, unidad, fecha) {
   cantidad = Number(cantidad) || 0;
   if (p.grupo === 'helado_granel') return unidad === 'caja' ? cantidad * pesoVigente(p, fecha) : cantidad;
-  const e = p.equiv || { packsPorCaja: 1, unidadesPorPack: 1 };
-  if (unidad === 'caja') return cantidad * e.packsPorCaja * e.unidadesPorPack;
-  if (unidad === 'pack') return cantidad * e.unidadesPorPack;
+  const e = p.equiv || { unidadesPorCaja: 1, cajasPorPack: 1 };
+  if (unidad === 'caja') return cantidad * e.unidadesPorCaja;
+  if (unidad === 'pack') return cantidad * e.cajasPorPack * e.unidadesPorCaja;
   return cantidad;
 }
 function unidadBaseLabel(p) { return p.grupo === 'helado_granel' ? 'kg' : 'u'; }
@@ -457,7 +457,19 @@ function aplicarBusqueda() {
   document.querySelectorAll('details.sec').forEach(d => { if (q) d.open = true; });
 }
 const dn = p => `data-n="${esc(p.nombre.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, ''))}"`;
-const cajasDe = (p, base) => Math.round((p.grupo === 'helado_granel' ? base / pesoVigente(p) : base / (p.equiv.packsPorCaja * p.equiv.unidadesPorPack)) * 10) / 10;
+const cajasDe = (p, base) => Math.round((p.grupo === 'helado_granel' ? base / pesoVigente(p) : base / p.equiv.unidadesPorCaja) * 10) / 10;
+const fmtCj = c => (Math.round(c * 10) / 10).toLocaleString('es-AR');
+// En depósitos el stock se expresa en packs y cajas, no en kg ni unidades
+function fmtDep(p, base) {
+  const neg = base < 0; base = Math.abs(base || 0);
+  let txt;
+  if (p.grupo === 'helado_granel') txt = fmtCj(base / pesoVigente(p)) + ' cj';
+  else { const e = p.equiv, cajas = base / e.unidadesPorCaja;
+    if (p.grupo === 'impulsivo' && e.cajasPorPack > 1) { const pk = Math.floor(cajas / e.cajasPorPack + 1e-9), rc = Math.max(0, cajas - pk * e.cajasPorPack); txt = (pk ? pk + ' pk' : '') + (rc > 0.05 || !pk ? (pk ? ' + ' : '') + fmtCj(rc) + ' cj' : ''); }
+    else txt = fmtCj(cajas) + ' cj'; }
+  return (neg ? '−' : '') + txt;
+}
+const esDeposito = sucId => (A.suc(sucId) || {}).tipo === 'deposito';
 
 // ============================================================ LOGIN
 function vLogin() {
@@ -467,7 +479,7 @@ function vLogin() {
   <label class="f"><span>Contraseña</span><input type="password" id="l_pass" autocomplete="current-password" required></label>
   ${e ? `<div class="warn" style="margin-bottom:10px">${esc(e)}</div>` : ''}
   <button class="btn primary block" type="submit" id="l_btn">Entrar</button></form>
-  <p class="tiny muted" style="margin-top:16px">Usuarios: gabriel, jaime, natali, nico, luana, fatima, camila. Si olvidaste tu contraseña, pedile a Gabriel que la reinicie.</p></div>`;
+  <p class="tiny muted" style="margin-top:16px">Usuarios: gabriel, sareska, jaime, natali, nico, luana, fatima, camila. Si olvidaste tu contraseña, pedile a Gabriel que la reinicie.</p></div>`;
 }
 
 // ============================================================ TABLERO
@@ -645,7 +657,7 @@ function vRemitoNuevo() {
   const S = A.S, deps = S.sucursales.filter(s => s.tipo === 'deposito' && (UI.user.rol === 'administrador' || UI.user.sucursales.includes(s.id)));
   const d = UI.params.draft || (UI.params.draft = { proveedorId: 'p1', numero: '', fecha: iso(HOY), archivo: '', items: {}, sucursalId: deps[0].id });
   const cam = A.suc(d.sucursalId);
-  const fila = p => `<div class="item" style="cursor:default" ${dn(p)}><div class="grow"><div class="t">${esc(p.nombre)}</div><div class="s">${p.grupo === 'helado_granel' ? `1 caja = ${pesoVigente(p)} kg` : `1 caja = ${p.equiv.packsPorCaja * p.equiv.unidadesPorPack} u${p.equiv.detectado ? '' : ' (equivalencia a confirmar)'}`}</div></div>
+  const fila = p => `<div class="item" style="cursor:default" ${dn(p)}><div class="grow"><div class="t">${esc(p.nombre)}</div><div class="s">${p.grupo === 'helado_granel' ? `1 caja = ${pesoVigente(p)} kg` : `1 caja = ${p.equiv.unidadesPorCaja} u · pack = ${p.equiv.cajasPorPack} cajas${p.equiv.detectado ? '' : ' (equivalencia a confirmar)'}`}</div></div>
     <div class="qty"><input type="number" min="0" step="1" value="${d.items[p.id] || 0}" data-rin="${p.id}" inputmode="numeric" aria-label="cajas de ${esc(p.nombre)}"><span class="small muted">cj</span></div></div>`;
   const total = Object.values(d.items).reduce((a, b) => a + b, 0);
   const ok = d.numero && d.fecha && d.archivo && total > 0;
@@ -679,13 +691,13 @@ function vInventarioNuevo() {
   const pasos = esDeposito ? ['Datos', 'Helado', 'Impulsivos', 'Insumos', 'Revisar'] : ['Datos', 'Helado', 'Impulsivos', 'Revisar'];
   const p = Math.min(d.paso, pasos.length - 1), ult = pasos.length - 1;
   const filaH = pr => { const it = d.items[pr.id] || (d.items[pr.id] = { cajasCerradas: 0, pesadas: [] }); const peso = pesoVigente(pr, d.fecha);
-    return `<div class="card" ${dn(pr)}><div class="row between"><div><div class="t" style="font-weight:600">${esc(pr.nombre)}</div><div class="tiny muted">caja cerrada = ${peso} kg</div></div><div class="num" style="font-weight:600" data-tot="${pr.id}">${fmtKg(it.cajasCerradas * peso + it.pesadas.reduce((a, b) => a + (+b || 0), 0))} kg</div></div>
+    return `<div class="card" ${dn(pr)}><div class="row between"><div><div class="t" style="font-weight:600">${esc(pr.nombre)}</div><div class="tiny muted">caja cerrada = ${peso} kg</div></div><div class="num" style="font-weight:600" data-tot="${pr.id}">${esDeposito ? it.cajasCerradas + ' cj' : fmtKg(it.cajasCerradas * peso + it.pesadas.reduce((a, b) => a + (+b || 0), 0)) + ' kg'}</div></div>
     <div class="row" style="margin-top:8px"><span class="small grow">Cajas cerradas</span><div class="qty"><button class="btn sm" data-ic="${pr.id}" data-d="-1">−</button><input type="number" min="0" step="1" value="${it.cajasCerradas}" data-icin="${pr.id}" inputmode="numeric"><button class="btn sm" data-ic="${pr.id}" data-d="1">+</button></div></div>
-    <div style="margin-top:8px"><span class="small">Cajas abiertas · peso real en kg de cada una</span><div class="grid2" style="margin-top:4px">${Array.from({ length: Math.max(2, it.pesadas.length) }).map((_, i) => `<label class="f" style="margin:0"><span>Caja abierta ${i + 1}</span><input type="number" step="0.01" min="0" placeholder="0.00 kg" value="${it.pesadas[i] ?? ''}" data-pesi="${pr.id}" data-i="${i}" inputmode="decimal"></label>`).join('')}</div>
+    <div style="margin-top:8px${esDeposito ? ';display:none' : ''}"><span class="small">Cajas abiertas · peso real en kg de cada una</span><div class="grid2" style="margin-top:4px">${Array.from({ length: Math.max(2, it.pesadas.length) }).map((_, i) => `<label class="f" style="margin:0"><span>Caja abierta ${i + 1}</span><input type="number" step="0.01" min="0" placeholder="0.00 kg" value="${it.pesadas[i] ?? ''}" data-pesi="${pr.id}" data-i="${i}" inputmode="decimal"></label>`).join('')}</div>
     <button class="btn sm ghost" data-addpes="${pr.id}" style="margin-top:6px">+ otra caja abierta</button></div></div>`; };
   const filaI = pr => { const it = d.items[pr.id] || (d.items[pr.id] = { cajas: 0, packs: 0, unidades: 0 }); const e = pr.equiv; const conPack = pr.grupo === 'impulsivo';
-    return `<div class="card" ${dn(pr)}><div class="row between"><div><div class="t" style="font-weight:600">${esc(pr.nombre)}</div><div class="tiny muted">${conPack ? `caja = ${e.packsPorCaja} pack${e.packsPorCaja > 1 ? 's' : ''} · pack = ${e.unidadesPorPack} u` : `caja = ${e.packsPorCaja * e.unidadesPorPack} u`}${e.detectado ? '' : ' · equivalencia a confirmar'}</div></div><div class="num" style="font-weight:600">${fmtN(aBase(pr, it.cajas, 'caja') + aBase(pr, it.packs, 'pack') + it.unidades)} u</div></div>
-    <div class="${conPack ? 'grid3' : 'grid2'}" style="margin-top:8px">${(conPack ? ['cajas', 'packs', 'unidades'] : ['cajas', 'unidades']).map(k => `<label class="f" style="margin:0"><span>${k}</span><input type="number" min="0" step="1" value="${it[k]}" data-ii="${pr.id}" data-k="${k}" inputmode="numeric"></label>`).join('')}</div></div>`; };
+    return `<div class="card" ${dn(pr)}><div class="row between"><div><div class="t" style="font-weight:600">${esc(pr.nombre)}</div><div class="tiny muted">${conPack ? `caja = ${e.unidadesPorCaja} u · pack = ${e.cajasPorPack} caja${e.cajasPorPack > 1 ? 's' : ''}` : `caja = ${e.unidadesPorCaja} u`}${e.detectado ? '' : ' · equivalencia a confirmar'}</div></div><div class="num" style="font-weight:600">${esDeposito ? fmtDep(pr, aBase(pr, it.cajas, 'caja') + aBase(pr, it.packs, 'pack')) : fmtN(aBase(pr, it.cajas, 'caja') + aBase(pr, it.packs, 'pack') + it.unidades) + ' u'}</div></div>
+    <div class="${conPack && !esDeposito ? 'grid3' : 'grid2'}" style="margin-top:8px">${(esDeposito ? (conPack && e.cajasPorPack > 1 ? ['packs', 'cajas'] : ['cajas']) : conPack ? ['cajas', 'packs', 'unidades'] : ['cajas', 'unidades']).map(k => `<label class="f" style="margin:0"><span>${k}</span><input type="number" min="0" step="1" value="${it[k]}" data-ii="${pr.id}" data-k="${k}" inputmode="numeric"></label>`).join('')}</div></div>`; };
   const grupoPaso = { Helado: 'helado_granel', Impulsivos: 'impulsivo', Insumos: 'insumo' }[pasos[p]];
   let body = '';
   if (p === 0) body = `<div class="card"><label class="f"><span>Sucursal</span><select id="inv_suc">${misSucursales().map(s => `<option value="${s.id}" ${d.sucursalId === s.id ? 'selected' : ''}>${esc(s.nombre)}</option>`).join('')}</select></label>
@@ -696,7 +708,7 @@ function vInventarioNuevo() {
     body = buscador() + porCategoria(prods).map(([c, ps]) => `<div class="cat"><div class="eyebrow catl">${esc(titulo(c))}</div>${ps.map(grupoPaso === 'helado_granel' ? filaH : filaI).join('')}</div>`).join('');
   } else {
     const rows = S.productos.filter(pr => pr.activo && P.enSuc(pr, d.sucursalId) && (esDeposito || pr.grupo !== 'insumo')).map(pr => { const it = { ...(d.items[pr.id] || {}) }; A.calcularItemInventario(pr, it, d.fecha); const teo = (d.teo && d.teo[pr.id]) || 0; const dv = it.real - teo; const pct = teo ? dv / teo * 100 : null; return { pr, real: it.real, teo, dv, pct }; }).filter(r => r.real || r.teo);
-    body = `<div class="card"><div class="tablewrap"><table><tr><th>Producto</th><th class="n">Teórico</th><th class="n">Contado</th><th class="n">Desvío</th></tr>${rows.map(r => { const s = A.semaforo(r.pct); const u = unidadBaseLabel(r.pr); const f = u === 'kg' ? fmtKg : fmtN; return `<tr><td><span class="dot ${s}"></span>${esc(r.pr.nombre)}</td><td class="n">${f(r.teo)}</td><td class="n">${f(r.real)}</td><td class="n"><span class="pill ${s}">${f(r.dv)} ${u}</span></td></tr>`; }).join('')}</table></div>
+    body = `<div class="card"><div class="tablewrap"><table><tr><th>Producto</th><th class="n">Teórico</th><th class="n">Contado</th><th class="n">Desvío</th></tr>${rows.map(r => { const s = A.semaforo(r.pct); const u = unidadBaseLabel(r.pr); const f = esDeposito ? v => fmtDep(r.pr, v) : u === 'kg' ? fmtKg : fmtN; return `<tr><td><span class="dot ${s}"></span>${esc(r.pr.nombre)}</td><td class="n">${f(r.teo)}</td><td class="n">${f(r.real)}</td><td class="n"><span class="pill ${s}">${f(r.dv)}${esDeposito ? '' : ' ' + u}</span></td></tr>`; }).join('')}</table></div>
     <p class="tiny muted" style="margin:8px 0 0">${rows.length} productos con stock o conteo. Al cerrar, el stock de ${esc(A.suc(d.sucursalId).nombre)} queda igual al contado y el desvío se registra como ajuste con tu usuario.</p></div>`;
   }
   return header('Nuevo conteo', 'inventario') + `<main><div class="steps">${pasos.map((s, i) => `<span class="${i <= p ? 'on' : ''}"></span>`).join('')}</div><div class="eyebrow" style="margin-bottom:10px">Paso ${p + 1} de ${pasos.length} · ${pasos[p]}</div>${body}
@@ -707,7 +719,7 @@ function vInventarioDetalle() {
   const rows = inv.items.map(it => ({ it, pr: A.prod(it.productoId) })).filter(r => r.it.real || r.it.teorico);
   return header('Conteo ' + fmtDateFull(inv.fecha), 'inventario') + `<main>
   <div class="card"><div class="row between"><div><div style="font-weight:600">${esc(A.suc(inv.sucursalId).nombre)}</div><div class="small muted">${inv.estado === 'cerrado' ? `Cerrado por ${esc(inv.cerradoPor)}` : 'Borrador de ' + esc(inv.por)}</div></div><span class="pill ${inv.estado === 'cerrado' ? 'verde' : 'gris'}">${inv.estado}</span></div></div>
-  <div class="card"><div class="tablewrap"><table><tr><th>Producto</th><th class="n">Teórico</th><th class="n">Real</th><th class="n">Desvío</th><th class="n">%</th></tr>${rows.map(({ it, pr }) => { const s = inv.estado === 'cerrado' ? A.semaforo(it.desvioPct) : 'gris'; const u = unidadBaseLabel(pr); const f = u === 'kg' ? fmtKg : fmtN; return `<tr><td><span class="dot ${s}"></span>${esc(pr.nombre)}${pr.grupo === 'helado_granel' ? `<div class="tiny muted">${it.cajasCerradas} cj × ${it.pesoAplicado} kg${it.pesadas && it.pesadas.filter(w => w !== '' && +w > 0).length ? ' + ' + it.pesadas.filter(w => w !== '' && +w > 0).join(' + ') + ' kg' : ''}</div>` : `<div class="tiny muted">${it.cajas || 0} cj · ${it.packs || 0} pk · ${it.unidades || 0} u</div>`}</td><td class="n">${it.teorico === undefined ? '—' : f(it.teorico)}</td><td class="n">${f(it.real || 0)}</td><td class="n">${it.desvio === undefined ? '—' : f(it.desvio)}</td><td class="n">${it.desvioPct === undefined ? '—' : `<span class="pill ${s}">${it.desvioPct === null ? '—' : fmtPct(it.desvioPct)}</span>`}</td></tr>`; }).join('')}</table></div></div></main>`;
+  <div class="card"><div class="tablewrap"><table><tr><th>Producto</th><th class="n">Teórico</th><th class="n">Real</th><th class="n">Desvío</th><th class="n">%</th></tr>${rows.map(({ it, pr }) => { const s = inv.estado === 'cerrado' ? A.semaforo(it.desvioPct) : 'gris'; const u = unidadBaseLabel(pr); const f = esDeposito(inv.sucursalId) ? v => fmtDep(pr, v) : u === 'kg' ? fmtKg : fmtN; return `<tr><td><span class="dot ${s}"></span>${esc(pr.nombre)}${pr.grupo === 'helado_granel' ? `<div class="tiny muted">${it.cajasCerradas} cj × ${it.pesoAplicado} kg${it.pesadas && it.pesadas.filter(w => w !== '' && +w > 0).length ? ' + ' + it.pesadas.filter(w => w !== '' && +w > 0).join(' + ') + ' kg' : ''}</div>` : `<div class="tiny muted">${it.cajas || 0} cj · ${it.packs || 0} pk · ${it.unidades || 0} u</div>`}</td><td class="n">${it.teorico === undefined ? '—' : f(it.teorico)}</td><td class="n">${f(it.real || 0)}</td><td class="n">${it.desvio === undefined ? '—' : f(it.desvio)}</td><td class="n">${it.desvioPct === undefined ? '—' : `<span class="pill ${s}">${it.desvioPct === null ? '—' : fmtPct(it.desvioPct)}</span>`}</td></tr>`; }).join('')}</table></div></div></main>`;
 }
 
 // ============================================================ STOCK
@@ -715,7 +727,7 @@ function vStock() {
   const S = A.S, locs = UI.user.rol === 'administrador' ? S.sucursales : misSucursales();
   const sel = UI.params.suc || locs[0].id;
   const esDep = A.suc(sel).tipo === 'deposito';
-  const fila = p => { const st = A.stock(sel, p.id); const cj = cajasDe(p, st); return `<div class="item" style="cursor:default" ${dn(p)}><div class="grow"><div class="t">${esc(p.nombre)}</div></div><div class="r"><div class="num">${(p.grupo === 'helado_granel' ? fmtKg : fmtN)(st)} ${unidadBaseLabel(p)}</div><div class="tiny muted">≈ ${cj.toFixed(1)} cj</div></div></div>`; };
+  const fila = p => { const st = A.stock(sel, p.id); const cj = cajasDe(p, st); const base = `${(p.grupo === 'helado_granel' ? fmtKg : fmtN)(st)} ${unidadBaseLabel(p)}`; return `<div class="item" style="cursor:default" ${dn(p)}><div class="grow"><div class="t">${esc(p.nombre)}</div></div><div class="r">${esDep ? `<div class="num">${fmtDep(p, st)}</div><div class="tiny muted">${base}</div>` : `<div class="num">${base}</div><div class="tiny muted">≈ ${cj.toFixed(1)} cj</div>`}</div></div>`; };
   const act = S.productos.filter(p => p.activo && P.enSuc(p, sel));
   return header('Stock teórico') + `<main><div class="chips">${locs.map(l => `<button class="chip ${sel === l.id ? 'on' : ''}" data-stocksuc="${l.id}">${l.nombre}</button>`).join('')}</div>
   ${buscador()}
@@ -728,7 +740,7 @@ function vMovimientos() {
   const S = A.S, sel = UI.params.suc;
   const list = S.movs[sel];
   if (!list) return header('Movimientos · ' + A.suc(sel).nombre, 'stock') + `<main><div class="card"><p class="muted small">Cargando…</p></div></main>`;
-  return header('Movimientos · ' + A.suc(sel).nombre, 'stock') + `<main><div class="card"><div class="list">${list.length ? '' : '<p class="muted small">Sin movimientos.</p>'}${list.map(m => { const p = A.prod(m.productoId); return `<div class="item" style="cursor:default"><div class="grow"><div class="t">${esc(p.nombre)} <span class="tiny muted">${TIPO_MOV[m.tipo]}</span></div><div class="s">${m.fecha.slice(0, 10).split('-').reverse().join('/')} · ${esc(m.ref)} · ${esc(m.por)}</div></div><div class="r num" style="color:var(--${m.cantidad >= 0 ? 'verde' : 'rojo'})">${m.cantidad >= 0 ? '+' : ''}${(p.grupo === 'helado_granel' ? fmtKg : fmtN)(m.cantidad)} ${unidadBaseLabel(p)}</div></div>`; }).join('')}</div></div></main>`;
+  return header('Movimientos · ' + A.suc(sel).nombre, 'stock') + `<main><div class="card"><div class="list">${list.length ? '' : '<p class="muted small">Sin movimientos.</p>'}${list.map(m => { const p = A.prod(m.productoId); return `<div class="item" style="cursor:default"><div class="grow"><div class="t">${esc(p.nombre)} <span class="tiny muted">${TIPO_MOV[m.tipo]}</span></div><div class="s">${m.fecha.slice(0, 10).split('-').reverse().join('/')} · ${esc(m.ref)} · ${esc(m.por)}</div></div><div class="r num" style="color:var(--${m.cantidad >= 0 ? 'verde' : 'rojo'})">${esDeposito(sel) ? (m.cantidad >= 0 ? '+' : '') + fmtDep(p, m.cantidad) : `${m.cantidad >= 0 ? '+' : ''}${(p.grupo === 'helado_granel' ? fmtKg : fmtN)(m.cantidad)} ${unidadBaseLabel(p)}`}</div></div>`; }).join('')}</div></div></main>`;
 }
 
 // ============================================================ MÁS
@@ -747,7 +759,7 @@ function vMas() {
 }
 function vProductos() {
   const S = A.S;
-  const fila = p => `<div class="item" data-go="producto-detalle" data-id="${p.id}" ${dn(p)}><div class="grow"><div class="t">${esc(p.nombre)}</div><div class="s">${p.grupo === 'helado_granel' ? `caja ${pesoVigente(p)} kg` : `caja = ${p.equiv.packsPorCaja * p.equiv.unidadesPorPack} u${p.equiv.detectado ? '' : ' · <span style="color:var(--ambar)">a confirmar</span>'}`} · <span class="mono">${p.codigoExt}</span>${p.soloEn ? ' · <span class="pill azul">solo Dep. Sociales</span>' : ''}</div></div><span class="muted">›</span></div>`;
+  const fila = p => `<div class="item" data-go="producto-detalle" data-id="${p.id}" ${dn(p)}><div class="grow"><div class="t">${esc(p.nombre)}</div><div class="s">${p.grupo === 'helado_granel' ? `caja ${pesoVigente(p)} kg` : `caja = ${p.equiv.unidadesPorCaja} u · pack = ${p.equiv.cajasPorPack} cj${p.equiv.detectado ? '' : ' · <span style="color:var(--ambar)">a confirmar</span>'}`} · <span class="mono">${p.codigoExt}</span>${p.soloEn ? ' · <span class="pill azul">solo Dep. Sociales</span>' : ''}</div></div><span class="muted">›</span></div>`;
   const sinEq = S.productos.filter(p => p.grupo !== 'helado_granel' && !p.equiv.detectado).length;
   return header('Productos', 'mas') + `<main>${sinEq ? `<div class="warn" style="margin-bottom:10px">${sinEq} productos sin equivalencia confirmada (caja → unidades). Se cargan una sola vez desde la ficha de cada producto o con la planilla maestro.</div>` : ''}
   ${buscador()}
@@ -762,9 +774,9 @@ function vProductoDetalle() {
   let body;
   if (p.grupo === 'helado_granel') body = `<div class="card"><h2>Peso promedio por caja</h2><div class="tablewrap"><table><tr><th>Vigente desde</th><th class="n">kg</th><th>Cargó</th></tr>${p.pesoCaja.slice().sort((a, b) => a.desde < b.desde ? 1 : -1).map((w, i) => `<tr><td>${fmtDateFull(w.desde)} ${i === 0 ? '<span class="pill verde">vigente</span>' : ''}</td><td class="n">${w.kg}</td><td class="muted">${esc(w.por)}</td></tr>`).join('')}</table></div>
     ${edit ? `<div class="row" style="margin-top:10px"><input type="number" step="0.01" min="0" id="np_kg" placeholder="nuevo peso kg" inputmode="decimal"><input type="date" id="np_desde" value="${iso(HOY)}"><button class="btn sm" id="np_add">Agregar</button></div><p class="tiny muted" style="margin:6px 0 0">Los remitos e inventarios anteriores conservan el peso que tenían al momento de cargarse.</p>` : ''}</div>`;
-  else body = `<div class="card"><h2>Equivalencias</h2><div class="grid2"><label class="f"><span>Packs por caja</span><input type="number" min="1" id="eq_p" value="${p.equiv.packsPorCaja}" ${edit ? '' : 'disabled'}></label><label class="f"><span>Unidades por pack</span><input type="number" min="1" id="eq_u" value="${p.equiv.unidadesPorPack}" ${edit ? '' : 'disabled'}></label></div><div class="note">1 caja = ${p.equiv.packsPorCaja * p.equiv.unidadesPorPack} unidades. Se carga una vez; remitos, pedidos e inventario convierten solos.${p.equiv.detectado ? ' Tomado de la planilla del sistema (unidades por bulto).' : ' <b>Falta confirmar:</b> se asumió 1 unidad por caja.'}</div>${edit ? '<button class="btn block" id="eq_save" style="margin-top:10px">Guardar equivalencias</button>' : ''}</div>`;
+  else body = `<div class="card"><h2>Equivalencias</h2><div class="grid2"><label class="f"><span>Unidades por caja</span><input type="number" min="1" id="eq_u" value="${p.equiv.unidadesPorCaja}" ${edit ? '' : 'disabled'}></label><label class="f"><span>Cajas por pack</span><input type="number" min="1" id="eq_p" value="${p.equiv.cajasPorPack}" ${edit ? '' : 'disabled'}></label></div><div class="note">1 caja = ${p.equiv.unidadesPorCaja} unidades · 1 pack = ${p.equiv.cajasPorPack} cajas = ${p.equiv.cajasPorPack * p.equiv.unidadesPorCaja} unidades. Se carga una vez; remitos, pedidos e inventario convierten solos.${p.equiv.detectado ? ' Tomado de la planilla del sistema (unidades por bulto).' : ' <b>Falta confirmar:</b> se asumió 1 unidad por caja.'}</div>${edit ? '<button class="btn block" id="eq_save" style="margin-top:10px">Guardar equivalencias</button>' : ''}</div>`;
   return header(p.nombre, 'productos') + `<main><div class="card"><div class="row between"><span class="pill azul">${P.GRUPO_LABEL[p.grupo]} · ${esc(titulo(p.categoria))}</span><span class="small muted">Código Smartfram: <b class="mono">${esc(p.codigoExt)}</b></span></div></div>${body}
-  <div class="card"><h2>Stock teórico ahora</h2>${S.sucursales.map(s => `<div class="row between small" style="padding:4px 0"><span>${esc(s.nombre)}</span><span class="num">${(p.grupo === 'helado_granel' ? fmtKg : fmtN)(A.stock(s.id, p.id))} ${unidadBaseLabel(p)}</span></div>`).join('')}</div></main>`;
+  <div class="card"><h2>Stock teórico ahora</h2>${S.sucursales.map(s => `<div class="row between small" style="padding:4px 0"><span>${esc(s.nombre)}</span><span class="num">${s.tipo === 'deposito' ? fmtDep(p, A.stock(s.id, p.id)) : `${(p.grupo === 'helado_granel' ? fmtKg : fmtN)(A.stock(s.id, p.id))} ${unidadBaseLabel(p)}`}</span></div>`).join('')}</div></main>`;
 }
 function vVentas() {
   const S = A.S, d = UI.params.draft || (UI.params.draft = { sucursalId: miLocal().id, filas: null, nombre: '' });
@@ -870,7 +882,7 @@ document.addEventListener('click', e => {
   }
   if (t.id === 'c_save') { S.config.umbralAmbar = Math.max(0, +$('#c_ambar').value || 0); S.config.umbralRojo = Math.max(S.config.umbralAmbar, +$('#c_rojo').value || 0); S.config.precioKgRef = +$('#c_precio').value || 0; ocupado(async () => { await A.guardarConfig(); commit('Configuración guardada'); }, 'Guardando…'); return; }
   if (t.id === 'np_add') { const p = A.prod(UI.params.id); const kg = parseFloat($('#np_kg').value); if (!(kg > 0)) return toast('Ingresá un peso válido'); p.pesoCaja = [...(p.pesoCaja || []), { kg, desde: $('#np_desde').value || iso(HOY), por: UI.user.nombre }]; ocupado(async () => { await A.guardarProducto(p); commit('Nuevo peso promedio registrado'); }, 'Guardando…'); return; }
-  if (t.id === 'eq_save') { const p = A.prod(UI.params.id); p.equiv.packsPorCaja = Math.max(1, +$('#eq_p').value || 1); p.equiv.unidadesPorPack = Math.max(1, +$('#eq_u').value || 1); p.equiv.detectado = true; ocupado(async () => { await A.guardarProducto(p); commit('Equivalencias guardadas'); }, 'Guardando…'); return; }
+  if (t.id === 'eq_save') { const p = A.prod(UI.params.id); p.equiv.unidadesPorCaja = Math.max(1, +$('#eq_u').value || 1); p.equiv.cajasPorPack = Math.max(1, +$('#eq_p').value || 1); p.equiv.detectado = true; ocupado(async () => { await A.guardarProducto(p); commit('Equivalencias guardadas'); }, 'Guardando…'); return; }
   if (t.id === 'nuevoProd') { const n = prompt('Nombre del sabor (helado a granel):'); if (!n) return; const nums = S.productos.filter(p => /^HEL-\d+$/.test(p.id)).map(p => +p.id.slice(4)); const id = 'HEL-' + String(Math.max(0, ...nums) + 1).padStart(3, '0');
     ocupado(async () => { await A.crearProducto({ id, nombre: n.trim().toUpperCase(), grupo: 'helado_granel', categoria: 'SABORES COMUNES', unidad: 'kg', codigoExt: id, pesoCaja: [{ kg: 7.8, desde: iso(HOY), por: UI.user.nombre }] }); commit('Sabor creado con caja de 7,8 kg; ajustalo en su ficha'); }, 'Guardando…'); return; }
 });
@@ -878,7 +890,7 @@ document.addEventListener('input', e => {
   const t = e.target, d = t.dataset;
   if (d.qin) UI.params.draft.items[d.qin] = Math.max(0, +t.value || 0);
   if (d.rin) { UI.params.draft.items[d.rin] = Math.max(0, +t.value || 0); refreshRemitoBtn(); }
-  if (d.icin) { const it = UI.params.draft.items[d.icin]; it.cajasCerradas = Math.max(0, +t.value || 0); const tot = document.querySelector(`[data-tot="${d.icin}"]`); if (tot) tot.textContent = P.fmtKg(it.cajasCerradas * pesoVigente(A.prod(d.icin), UI.params.draft.fecha) + it.pesadas.reduce((a, b) => a + (+b || 0), 0)) + ' kg'; }
+  if (d.icin) { const it = UI.params.draft.items[d.icin]; it.cajasCerradas = Math.max(0, +t.value || 0); const tot = document.querySelector(`[data-tot="${d.icin}"]`); if (tot) tot.textContent = esDeposito(UI.params.draft.sucursalId) ? it.cajasCerradas + ' cj' : P.fmtKg(it.cajasCerradas * pesoVigente(A.prod(d.icin), UI.params.draft.fecha) + it.pesadas.reduce((a, b) => a + (+b || 0), 0)) + ' kg'; }
   if (d.pesi) { const ps = UI.params.draft.items[d.pesi].pesadas; while (ps.length <= +d.i) ps.push(''); ps[+d.i] = t.value === '' ? '' : Math.max(0, parseFloat(t.value) || 0); const tot = document.querySelector(`[data-tot="${d.pesi}"]`); if (tot) tot.textContent = P.fmtKg(UI.params.draft.items[d.pesi].cajasCerradas * pesoVigente(A.prod(d.pesi), UI.params.draft.fecha) + ps.reduce((a, b) => a + (+b || 0), 0)) + ' kg'; }
   if (d.ii) UI.params.draft.items[d.ii][d.k] = Math.max(0, +t.value || 0);
   if (t.id === 'notas') UI.params.draft.notas = t.value;
