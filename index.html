@@ -671,7 +671,7 @@ function vRemitoNuevo() {
   <div class="file ${d.archivo ? 'ok' : ''}" id="r_filebox">${d.archivo ? '📎 ' + esc(d.archivo) : 'Sacale una foto al remito o adjuntá el PDF'}</div>
   ${d.file && /^image\//.test(d.file.type || '') ? `<button class="btn block" id="ocrBtn" style="margin-top:8px">🔍 Leer los productos de la foto</button>` : ''}
   <p class="tiny muted" style="margin:8px 0 0">Ingresa a ${esc(cam.nombre)}. Queda registrado quién lo cargó y a qué hora.</p></div>
-  ${d.ocr ? `<div class="card"><h2>Leído de la foto</h2><div class="small">${d.ocr.ok.length} productos reconocidos${d.ocr.total ? ` · total impreso ${d.ocr.total} cj` : ''} · cargados ${d.ocr.ok.reduce((a, l) => a + l.cant, 0)} cj</div>
+  ${d.ocr ? `<div class="card"><h2>Leído de la foto</h2><div class="small">${d.ocr.ok.length} productos reconocidos${d.ocr.total ? ` · total impreso ${d.ocr.total} cj` : ''} · cargados ${d.ocr.ok.reduce((a, l) => a + l.cant, 0)} cj</div><div class="small" style="margin-top:4px">Destino elegido: <b>${esc(d.ocr.destino)}</b> <span class="muted">(${esc(d.ocr.pista)}; cambialo arriba si no corresponde)</span></div>
     ${d.ocr.ok.length ? `<div class="tablewrap" style="margin-top:6px"><table><tr><th>Producto</th><th class="n">Cajas</th></tr>${d.ocr.ok.map(l => `<tr><td>${esc(A.prod(l.id).nombre)}<div class="tiny muted">${esc(l.txt)}</div></td><td class="n">${l.cant}</td></tr>`).join('')}</table></div>` : ''}
     ${d.ocr.dudas.length ? `<div class="warn" style="margin-top:8px">No reconocí ${d.ocr.dudas.length} renglón${d.ocr.dudas.length > 1 ? 'es' : ''}; cargalos a mano: ${d.ocr.dudas.map(esc).join(' · ')}</div>` : ''}
     <p class="tiny muted" style="margin:8px 0 0">Revisá las cantidades abajo antes de confirmar. La lectura es una ayuda, no reemplaza el control.</p></div>` : ''}
@@ -972,15 +972,19 @@ async function leerRemitoFoto() {
   let texto = '';
   try { const r = await worker.recognize(canvas); texto = r.data.text || ''; } finally { await worker.terminate(); }
   const up = texto.toUpperCase();
-  if (/V[IÍ]A\s*BANA/.test(up)) { const pv = S.proveedores.find(x => /via\s*bana/i.test(x.nombre)); if (pv) d.proveedorId = pv.id; const soc = S.sucursales.find(x => x.tipo === 'deposito' && /social/i.test(x.nombre)); if (soc && (UI.user.rol === 'administrador' || UI.user.sucursales.includes(soc.id)) && soc.id !== d.sucursalId) { d.sucursalId = soc.id; d.items = {}; } }
-  else if (/HELACOR|GRIDO/.test(up)) { const pg = S.proveedores.find(x => /grido/i.test(x.nombre)); if (pg) d.proveedorId = pg.id; }
+  // Helacor provee a los dos depósitos: el destino se decide por lo que dice la hoja (Vía Bana / Heladería Social → Dep. Sociales; si no, Cámara)
+  if (/HELACOR|GRIDO|V[IÍ]A\s*BANA/.test(up)) { const ph = S.proveedores.find(x => /helacor|grido/i.test(x.nombre)); if (ph) d.proveedorId = ph.id; }
+  const esSocial = /V[IÍ]A\s*BANA|HELADER[IÍ]A\s*SOCIAL/.test(up);
+  const destino = S.sucursales.find(x => x.tipo === 'deposito' && (esSocial ? /social/i.test(x.nombre) : !/social/i.test(x.nombre)));
+  const puedeDestino = destino && (UI.user.rol === 'administrador' || UI.user.sucursales.includes(destino.id));
+  if (puedeDestino && destino.id !== d.sucursalId) { d.sucursalId = destino.id; d.items = {}; }
   const cam = A.suc(d.sucursalId); const candidatos = S.productos.filter(p => p.activo && P.enSuc(p, cam.id));
   const { ok, dudas } = parsearLineas(texto, candidatos, S.mapeo);
   const mNum = texto.match(/N[º°o]?\s*(\d{4,5})\s*[-–]\s*(\d{6,9})/); if (mNum && !d.numero) d.numero = mNum[1] + '-' + mNum[2];
   const mFecha = texto.match(/\b(\d{2})\/(\d{2})\/(20\d{2})\b/); if (mFecha) d.fecha = `${mFecha[3]}-${mFecha[2]}-${mFecha[1]}`;
   const mTot = texto.match(/TOTAL[:\s]*(\d{1,5})\b/i); const total = mTot ? +mTot[1] : null;
   for (const l of ok) d.items[l.id] = (d.items[l.id] || 0) + l.cant;
-  d.ocr = { ok, dudas, total };
+  d.ocr = { ok, dudas, total, destino: A.suc(d.sucursalId).nombre, pista: esSocial ? 'la hoja menciona Vía Bana / Heladería Social' : 'la hoja no menciona Vía Bana' };
   render(); window.scrollTo(0, 0);
   toast(ok.length ? `Reconocí ${ok.length} productos` : 'No pude leer productos en la foto; probá con más luz y la hoja derecha');
 }
