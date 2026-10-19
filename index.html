@@ -258,7 +258,7 @@ async function cargarTodo() {
   const { data: { user } } = await sb.auth.getUser();
   if (!user) throw new Error('Sin sesión');
   const desdeSem = iso(addDays(HOY, -7 * 14));
-  const [sucursales, usuarios, proveedores, productos, remitos, pedidos, stockRows, inventarios, importaciones, ventasSem, config, auditoria] = await Promise.all([
+  const [sucursales, usuarios, proveedores, productos, remitos, pedidos, stockRows, inventarios, importaciones, ventasSem, config, auditoria, mapeoRows] = await Promise.all([
     q(sb.from('sucursal').select('*').order('nombre'), 'sucursales'),
     q(sb.from('usuario').select('*'), 'usuarios'),
     q(sb.from('proveedor').select('*').eq('activo', true), 'proveedores'),
@@ -271,6 +271,7 @@ async function cargarTodo() {
     q(sb.from('v_ventas_semana').select('*').gte('semana', desdeSem), 'ventas'),
     q(sb.from('config').select('*'), 'config'),
     q(sb.from('auditoria').select('*').order('id', { ascending: false }).limit(80), 'auditoría'),
+    q(sb.from('mapeo').select('*'), 'mapeo'),
   ]);
   const cfg = { umbralAmbar: 0, umbralRojo: 2, precioKgRef: 18500 };
   for (const c of config) cfg[c.clave] = typeof c.valor === 'number' ? c.valor : Number(c.valor) || c.valor;
@@ -279,8 +280,9 @@ async function cargarTodo() {
     remitos: remitos.map(mRemito), pedidos: pedidos.map(mPedido), inventarios: inventarios.map(mInv), importaciones: importaciones.map(mImp),
     ventasSem: ventasSem.map(v => ({ sucursalId: v.sucursal_id, semana: v.semana, grupo: v.grupo, cantidad: Number(v.cantidad), importe: Number(v.importe) })),
     config: cfg, auditoria: auditoria.map(a => ({ entidad: a.entidad, id: a.entidad_id, accion: a.accion, por: a.por, en: String(a.en).slice(0, 16).replace('T', ' ') })),
-    stockMap: {}, movs: {},
+    stockMap: {}, movs: {}, mapeo: {},
   };
+  for (const r of mapeoRows) S.mapeo[String(r.codigo_ext)] = r.producto_id;
   for (const r of stockRows) S.stockMap[r.sucursal_id + '|' + r.producto_id] = Number(r.stock);
   const yo = S.usuarios.find(u => u.id === user.id);
   if (!yo) throw new Error('Tu usuario no está dado de alta en la app. Avisale al administrador.');
@@ -667,7 +669,12 @@ function vRemitoNuevo() {
   <div class="grid2"><label class="f"><span>Número de remito</span><input type="text" id="r_num" value="${esc(d.numero)}" placeholder="0001-00004421"></label><label class="f"><span>Fecha</span><input type="date" id="r_fecha" value="${d.fecha}"></label></div>
   <label class="f"><span>Foto o PDF del remito (obligatorio)</span><input type="file" id="r_file" accept="image/*,.pdf" capture="environment"></label>
   <div class="file ${d.archivo ? 'ok' : ''}" id="r_filebox">${d.archivo ? '📎 ' + esc(d.archivo) : 'Sacale una foto al remito o adjuntá el PDF'}</div>
+  ${d.file && /^image\//.test(d.file.type || '') ? `<button class="btn block" id="ocrBtn" style="margin-top:8px">🔍 Leer los productos de la foto</button>` : ''}
   <p class="tiny muted" style="margin:8px 0 0">Ingresa a ${esc(cam.nombre)}. Queda registrado quién lo cargó y a qué hora.</p></div>
+  ${d.ocr ? `<div class="card"><h2>Leído de la foto</h2><div class="small">${d.ocr.ok.length} productos reconocidos${d.ocr.total ? ` · total impreso ${d.ocr.total} cj` : ''} · cargados ${d.ocr.ok.reduce((a, l) => a + l.cant, 0)} cj</div>
+    ${d.ocr.ok.length ? `<div class="tablewrap" style="margin-top:6px"><table><tr><th>Producto</th><th class="n">Cajas</th></tr>${d.ocr.ok.map(l => `<tr><td>${esc(A.prod(l.id).nombre)}<div class="tiny muted">${esc(l.txt)}</div></td><td class="n">${l.cant}</td></tr>`).join('')}</table></div>` : ''}
+    ${d.ocr.dudas.length ? `<div class="warn" style="margin-top:8px">No reconocí ${d.ocr.dudas.length} renglón${d.ocr.dudas.length > 1 ? 'es' : ''}; cargalos a mano: ${d.ocr.dudas.map(esc).join(' · ')}</div>` : ''}
+    <p class="tiny muted" style="margin:8px 0 0">Revisá las cantidades abajo antes de confirmar. La lectura es una ayuda, no reemplaza el control.</p></div>` : ''}
   ${buscador()}
   ${seccion('Helado a granel', act.filter(p => p.grupo === 'helado_granel'), fila, true)}
   ${seccion('Impulsivos', act.filter(p => p.grupo === 'impulsivo'), fila, false)}
@@ -833,7 +840,7 @@ function render() {
 const nowStamp = () => { const d = new Date(); return iso(d) + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); };
 
 document.addEventListener('click', e => {
-  const t = e.target.closest('[data-adj],[data-go],[data-periodo],[data-suc],[data-qty],[data-estado],[data-paso],[data-ic],[data-addpes],[data-delpes],[data-stocksuc],#refrescar,#crearPedido,#confRemito,#cerrarInv,#guardarInv,#logout,#cambiarPass,#impConfirm,#c_save,#np_add,#eq_save,#nuevoProd');
+  const t = e.target.closest('[data-adj],[data-go],[data-periodo],[data-suc],[data-qty],[data-estado],[data-paso],[data-ic],[data-addpes],[data-delpes],[data-stocksuc],#refrescar,#ocrBtn,#crearPedido,#confRemito,#cerrarInv,#guardarInv,#logout,#cambiarPass,#impConfirm,#c_save,#np_add,#eq_save,#nuevoProd');
   if (!t) return;
   const S = A.S, d = t.dataset;
   if (d.adj) { e.preventDefault(); A.urlAdjunto(d.adj).then(u => window.open(u, '_blank')).catch(er => toast(er.message)); return; }
@@ -856,6 +863,7 @@ document.addEventListener('click', e => {
     ocupado(async () => { await A.cambiarEstadoPedido(p, d.estado); commit(d.estado === 'recibido' ? 'Recepción confirmada: stock actualizado en ' + A.suc(p.origen).nombre : ESTADO[d.estado][0]); }, 'Guardando…');
     return;
   }
+  if (t.id === 'ocrBtn') { ocupado(leerRemitoFoto, 'Leyendo la foto… puede tardar unos segundos'); return; }
   if (t.id === 'confRemito') {
     const dr = UI.params.draft;
     const r = { proveedorId: dr.proveedorId, numero: dr.numero, fecha: dr.fecha, sucursalId: dr.sucursalId, archivo: dr.archivo, items: Object.entries(dr.items).filter(([, v]) => v > 0).map(([productoId, cantidad]) => ({ productoId, cantidad, unidad: 'caja' })) };
@@ -904,9 +912,78 @@ document.addEventListener('input', e => {
 function refreshRemitoBtn() { const d = UI.params.draft; const total = Object.values(d.items).reduce((a, b) => a + b, 0); const ok = d.numero && d.fecha && d.archivo && total > 0; const b = $('#confRemito'); if (b) { b.disabled = !ok; b.textContent = `Confirmar ingreso (${total} cajas)`; } }
 document.addEventListener('change', e => {
   const t = e.target;
-  if (t.id === 'r_file' && t.files[0]) { UI.params.draft.archivo = t.files[0].name; UI.params.draft.file = t.files[0]; const box = $('#r_filebox'); box.className = 'file ok'; box.textContent = '📎 ' + t.files[0].name; refreshRemitoBtn(); }
+  if (t.id === 'r_file' && t.files[0]) { UI.params.draft.archivo = t.files[0].name; UI.params.draft.file = t.files[0]; UI.params.draft.ocr = null; render(); refreshRemitoBtn(); }
   if (t.id === 'imp_file' && t.files[0]) leerExcel(t.files[0]);
 });
+// ---------- Lectura de remitos desde la foto (OCR en el teléfono, sin servidor) ----------
+const normTxt = s => String(s || '').toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/(\d)[,.](\d)/g, '$1$2').replace(/[^A-Z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+const RUIDO = /\b(12 ?LTS?|7800 ?KG|7800|KG|LTS?|ITS|GRIDO|GR|X ?\d+ ?UN|UN|UND|UNID|12)\b/g;
+const limpiarNombre = s => { let t = normTxt(s).replace(RUIDO, ' ').replace(/\s+/g, ' ').trim(); const m = t.match(/[A-Z]{3,}.*$/); t = m ? m[0] : ''; return t.replace(/\s+[A-Z0-9]{1,2}$/, '').replace(/\s+/g, ' ').trim(); };
+const squash = s => s.replace(/[^A-Z]/g, '');
+function lev(a, b) { const m = a.length, n = b.length; if (!m || !n) return Math.max(m, n); let prev = Array.from({ length: n + 1 }, (_, j) => j); for (let i = 1; i <= m; i++) { const cur = [i]; for (let j = 1; j <= n; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)); prev = cur; } return prev[n]; }
+const simTok = (x, w) => { if (x === w) return 1; if (x.length > 3 && w.length > 3 && (w.startsWith(x.slice(0, 4)) || x.startsWith(w.slice(0, 4)))) return 0.7; const s = 1 - lev(x, w) / Math.max(x.length, w.length); return s >= 0.6 ? s * 0.9 : 0; };
+function buscarProductoPorTexto(txt, candidatos) {
+  const t = limpiarNombre(txt); if (t.length < 3) return null;
+  const lista = candidatos.map(p => ({ p, n: limpiarNombre(p.nombre) })).filter(x => x.n);
+  const sq = squash(t);
+  if (sq.length >= 3) { const suf = lista.filter(x => { const n = squash(x.n); return n === sq || n.endsWith(sq) || (sq.length >= 6 && n.includes(sq)); }); if (suf.length === 1) return suf[0].p; const ex = suf.find(x => squash(x.n) === sq); if (ex) return ex.p; if (suf.length > 1) return null; }
+  const tok = t.split(' ').filter(w => w.length > 2); if (!tok.length) return null;
+  const puntajes = lista.map(x => { const ntok = x.n.split(' ').filter(w => w.length > 2); if (!ntok.length) return { p: x.p, s: 0 }; let hit = 0; for (const o of tok) { let b = 0; for (const w of ntok) b = Math.max(b, simTok(o, w)); hit += b; } return { p: x.p, s: hit / tok.length * 0.6 + hit / ntok.length * 0.4, ntok }; });
+  for (const o of tok) { if (o.length < 5) continue; const con = puntajes.filter(x => x.ntok && x.ntok.some(w => w.length >= 4 && simTok(o, w) >= 0.7)); if (con.length === 1) con[0].s += 0.4; }
+  puntajes.sort((a, b) => b.s - a.s);
+  const [b1, b2] = puntajes; if (!b1) return null;
+  return b1.s >= 0.7 && (!b2 || b1.s - b2.s >= 0.15) ? b1.p : null;
+}
+function parsearLineas(texto, candidatos, mapeo) {
+  const ok = [], dudas = [];
+  for (let l of texto.split(/\n/)) {
+    l = l.trim(); if (l.length < 6) continue;
+    let cod = null, nom = null, cant = null, fallback = false;
+    const m1 = l.match(/^[^\dA-Z]*(\d{5,8})\s+(.{3,}?)\s+(\d{1,4})\s*$/i);
+    const marca = l.search(/\s(?:12|M2|22|2)\s*[A-Za-z]{2,3}\b|\s7[,.']?\s?800\b|\sL[tT]s\b|\sK[gG]\b/);
+    const m2 = l.match(/(?:GRIDO|GR|K[gG]|Ke)[\s.\-:]*?(\d{1,4})\b/);
+    if (m1) { [, cod, nom, cant] = m1; }
+    else if (marca > 0) { nom = l.slice(0, marca); cant = m2 ? m2[1] : null; }
+    else { const m3 = l.match(/^[^A-Za-z]*([A-Za-z][A-Za-z .\/]{3,}?)\s+(\d{1,3})\b/); if (!m3) continue; nom = m3[1]; cant = m3[2]; fallback = true; }
+    let p = null;
+    if (cod && mapeo[cod]) p = candidatos.find(x => x.id === mapeo[cod]) || null;
+    if (!p) p = buscarProductoPorTexto(nom, candidatos);
+    const etiqueta = limpiarNombre(nom) || nom.trim();
+    if (p && cant && +cant > 0 && +cant < 1000) ok.push({ id: p.id, cant: +cant, txt: etiqueta });
+    else if (p) dudas.push(etiqueta + ' (cantidad ilegible)');
+    else if (!fallback && etiqueta.length >= 3) dudas.push(etiqueta + (cant ? ' (' + cant + ')' : ' (cantidad ilegible)'));
+  }
+  return { ok, dudas };
+}
+function cargarScript(src) { return new Promise((ok, no) => { if (document.querySelector(`script[src="${src}"]`)) return ok(); const s = document.createElement('script'); s.src = src; s.onload = ok; s.onerror = () => no(new Error('No se pudo cargar el lector de texto')); document.head.appendChild(s); }); }
+function imagenPreparada(file) {
+  return new Promise((ok, no) => { const img = new Image(); const url = URL.createObjectURL(file);
+    img.onload = () => { const max = 2200; const k = Math.min(1, max / Math.max(img.width, img.height)); const c = document.createElement('canvas'); c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
+      const g = c.getContext('2d'); g.drawImage(img, 0, 0, c.width, c.height); const d = g.getImageData(0, 0, c.width, c.height), px = d.data;
+      for (let i = 0; i < px.length; i += 4) { const y = px[i] * 0.3 + px[i + 1] * 0.59 + px[i + 2] * 0.11; const v = Math.max(0, Math.min(255, (y - 110) * 1.9 + 128)); px[i] = px[i + 1] = px[i + 2] = v; }
+      g.putImageData(d, 0, 0); URL.revokeObjectURL(url); ok(c); };
+    img.onerror = () => no(new Error('No se pudo abrir la imagen')); img.src = url; });
+}
+async function leerRemitoFoto() {
+  const S = A.S, d = UI.params.draft; if (!d || !d.file) return toast('Primero sacá la foto del remito');
+  await cargarScript('https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.1/tesseract.min.js');
+  const canvas = await imagenPreparada(d.file);
+  const worker = await Tesseract.createWorker('spa', 1, { logger: m => { if (m.status === 'recognizing text') { const t = $('#toast'); t.textContent = 'Leyendo la foto… ' + Math.round(m.progress * 100) + ' %'; t.classList.add('show'); } } });
+  let texto = '';
+  try { const r = await worker.recognize(canvas); texto = r.data.text || ''; } finally { await worker.terminate(); }
+  const up = texto.toUpperCase();
+  if (/V[IÍ]A\s*BANA/.test(up)) { const pv = S.proveedores.find(x => /via\s*bana/i.test(x.nombre)); if (pv) d.proveedorId = pv.id; const soc = S.sucursales.find(x => x.tipo === 'deposito' && /social/i.test(x.nombre)); if (soc && (UI.user.rol === 'administrador' || UI.user.sucursales.includes(soc.id)) && soc.id !== d.sucursalId) { d.sucursalId = soc.id; d.items = {}; } }
+  else if (/HELACOR|GRIDO/.test(up)) { const pg = S.proveedores.find(x => /grido/i.test(x.nombre)); if (pg) d.proveedorId = pg.id; }
+  const cam = A.suc(d.sucursalId); const candidatos = S.productos.filter(p => p.activo && P.enSuc(p, cam.id));
+  const { ok, dudas } = parsearLineas(texto, candidatos, S.mapeo);
+  const mNum = texto.match(/N[º°o]?\s*(\d{4,5})\s*[-–]\s*(\d{6,9})/); if (mNum && !d.numero) d.numero = mNum[1] + '-' + mNum[2];
+  const mFecha = texto.match(/\b(\d{2})\/(\d{2})\/(20\d{2})\b/); if (mFecha) d.fecha = `${mFecha[3]}-${mFecha[2]}-${mFecha[1]}`;
+  const mTot = texto.match(/TOTAL[:\s]*(\d{1,5})\b/i); const total = mTot ? +mTot[1] : null;
+  for (const l of ok) d.items[l.id] = (d.items[l.id] || 0) + l.cant;
+  d.ocr = { ok, dudas, total };
+  render(); window.scrollTo(0, 0);
+  toast(ok.length ? `Reconocí ${ok.length} productos` : 'No pude leer productos en la foto; probá con más luz y la hoja derecha');
+}
 function leerExcel(file) {
   const rd = new FileReader();
   rd.onload = ev => {
