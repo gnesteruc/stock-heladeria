@@ -766,7 +766,7 @@ function vMas() {
 }
 function vProductos() {
   const S = A.S;
-  const fila = p => `<div class="item" data-go="producto-detalle" data-id="${p.id}" ${dn(p)}><div class="grow"><div class="t">${esc(p.nombre)}</div><div class="s">${p.grupo === 'helado_granel' ? `caja ${pesoVigente(p)} kg` : `caja = ${p.equiv.unidadesPorCaja} u · pack = ${p.equiv.cajasPorPack} cj${p.equiv.detectado ? '' : ' · <span style="color:var(--ambar)">a confirmar</span>'}`} · <span class="mono">${p.codigoExt}</span>${p.soloEn ? ' · <span class="pill azul">solo Dep. Sociales</span>' : ''}</div></div><span class="muted">›</span></div>`;
+  const fila = p => `<div class="item" data-go="producto-detalle" data-id="${p.id}" ${dn(p)}><div class="grow"><div class="t">${esc(p.nombre)}</div><div class="s">${p.grupo === 'helado_granel' ? `caja ${pesoVigente(p)} kg` : `caja = ${p.equiv.unidadesPorCaja} u · pack = ${p.equiv.cajasPorPack} cj${p.equiv.detectado ? '' : ' · <span style="color:var(--ambar)">a confirmar</span>'}`} · <span class="mono">${p.codigoExt}</span>${p.soloEn && p.soloEn.length === 1 && p.soloEn[0] === 'soc' ? ' · <span class="pill azul">solo Dep. Sociales</span>' : ''}</div></div><span class="muted">›</span></div>`;
   const sinEq = S.productos.filter(p => p.grupo !== 'helado_granel' && !p.equiv.detectado).length;
   return header('Productos', 'mas') + `<main>${sinEq ? `<div class="warn" style="margin-bottom:10px">${sinEq} productos sin equivalencia confirmada (caja → unidades). Se cargan una sola vez desde la ficha de cada producto o con la planilla maestro.</div>` : ''}
   ${buscador()}
