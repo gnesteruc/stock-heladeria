@@ -669,7 +669,7 @@ function vRemitoNuevo() {
   <div class="grid2"><label class="f"><span>Número de remito</span><input type="text" id="r_num" value="${esc(d.numero)}" placeholder="0001-00004421"></label><label class="f"><span>Fecha</span><input type="date" id="r_fecha" value="${d.fecha}"></label></div>
   <label class="f"><span>Foto o PDF del remito (obligatorio)</span><input type="file" id="r_file" accept="image/*,.pdf" capture="environment"></label>
   <div class="file ${d.archivo ? 'ok' : ''}" id="r_filebox">${d.archivo ? '📎 ' + esc(d.archivo) : 'Sacale una foto al remito o adjuntá el PDF'}</div>
-  ${d.file && /^image\//.test(d.file.type || '') ? `<button class="btn block" id="ocrBtn" style="margin-top:8px">🔍 Leer los productos de la foto</button>` : ''}
+  ${d.file && (/^image\//.test(d.file.type || '') || /pdf$/i.test(d.file.type || '') || /\.pdf$/i.test(d.file.name || '')) ? `<button class="btn block" id="ocrBtn" style="margin-top:8px">🔍 Leer los productos de la foto o del PDF</button>` : ''}
   <p class="tiny muted" style="margin:8px 0 0">Ingresa a ${esc(cam.nombre)}. Queda registrado quién lo cargó y a qué hora.</p></div>
   ${d.ocr ? `<div class="card"><h2>Leído de la foto</h2><div class="small">${d.ocr.ok.length} productos reconocidos${d.ocr.total ? ` · total impreso ${d.ocr.total} cj` : ''} · cargados ${d.ocr.ok.reduce((a, l) => a + l.cant, 0)} cj</div><div class="small" style="margin-top:4px">Destino elegido: <b>${esc(d.ocr.destino)}</b> <span class="muted">(${esc(d.ocr.pista)}; cambialo arriba si no corresponde)</span></div>
     ${d.ocr.ok.length ? `<div class="tablewrap" style="margin-top:6px"><table><tr><th>Producto</th><th class="n">Cajas</th></tr>${d.ocr.ok.map(l => `<tr><td>${esc(A.prod(l.id).nombre)}<div class="tiny muted">${esc(l.txt)}</div></td><td class="n">${l.cant}</td></tr>`).join('')}</table></div>` : ''}
@@ -916,19 +916,24 @@ document.addEventListener('change', e => {
   if (t.id === 'imp_file' && t.files[0]) leerExcel(t.files[0]);
 });
 // ---------- Lectura de remitos desde la foto (OCR en el teléfono, sin servidor) ----------
-const normTxt = s => String(s || '').toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/(\d)[,.](\d)/g, '$1$2').replace(/[^A-Z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
-const RUIDO = /\b(12 ?LTS?|7800 ?KG|7800|KG|LTS?|ITS|GRIDO|GR|X ?\d+ ?UN|UN|UND|UNID|12)\b/g;
-const limpiarNombre = s => { let t = normTxt(s).replace(RUIDO, ' ').replace(/\s+/g, ' ').trim(); const m = t.match(/[A-Z]{3,}.*$/); t = m ? m[0] : ''; return t.replace(/\s+[A-Z0-9]{1,2}$/, '').replace(/\s+/g, ' ').trim(); };
-const squash = s => s.replace(/[^A-Z]/g, '');
+const SINON = { DL: 'DDL', PAL: 'PALITO', BOMB: 'BOMBON', CAJ: '', CAJA: '', CAJAS: '', PACK: '', U: '', UN: '', UND: '', UNID: '', GR: '', GRIDO: '', KG: '', LTS: '', LT: '', ITS: '', TORTA: 'TORTA' };
+const normTxt = s => String(s || '').toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/(\d)[,.](\d)/g, '$1$2').replace(/X\s*(\d+)\s*(?:UN|UND|UNID|U)?\b/g, ' X$1 ').replace(/\bN(?:RO|UM|º|°)?\s*[º°]?\s*(\d)\b/g, ' N$1 ').replace(/[^A-Z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+const limpiarNombre = s => { let t = normTxt(s).replace(/^(PACK\s*X?\s*\d*\s*(CAJAS|CAJ|C|U|UN|X)?\s*)+/, '').replace(/\bX?\s*3\s*LTS?\b|\b(12 ?LTS?|7800 ?KG|7800|12|X3)\b/g, ' ');
+  t = t.split(' ').map(w => w in SINON ? SINON[w] : w).filter(Boolean).join(' ');
+  const m = t.match(/(?:[A-Z]{3,}|[XN]\d+).*$/); t = m ? m[0] : ''; return t.replace(/\s+[A-Z]{1,2}$/, '').replace(/\s+/g, ' ').trim(); };
+const squash = s => s.replace(/[^A-Z0-9]/g, '');
 function lev(a, b) { const m = a.length, n = b.length; if (!m || !n) return Math.max(m, n); let prev = Array.from({ length: n + 1 }, (_, j) => j); for (let i = 1; i <= m; i++) { const cur = [i]; for (let j = 1; j <= n; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)); prev = cur; } return prev[n]; }
-const simTok = (x, w) => { if (x === w) return 1; if (x.length > 3 && w.length > 3 && (w.startsWith(x.slice(0, 4)) || x.startsWith(w.slice(0, 4)))) return 0.7; const s = 1 - lev(x, w) / Math.max(x.length, w.length); return s >= 0.6 ? s * 0.9 : 0; };
+const simTok = (x, w) => { if (x === w) return 1; if (/^[XN]\d+$/.test(x) || /^[XN]\d+$/.test(w)) return 0; if (x.length >= 3 && w.length > x.length && w.startsWith(x)) return 0.7; if (x.length > 3 && w.length > 3 && (w.startsWith(x.slice(0, 4)) || x.startsWith(w.slice(0, 4)))) return 0.7; const s = 1 - lev(x, w) / Math.max(x.length, w.length); return s >= 0.6 ? s * 0.9 : 0; };
 function buscarProductoPorTexto(txt, candidatos) {
   const t = limpiarNombre(txt); if (t.length < 3) return null;
   const lista = candidatos.map(p => ({ p, n: limpiarNombre(p.nombre) })).filter(x => x.n);
+  const ex = lista.find(x => x.n === t); if (ex) return ex.p;
   const sq = squash(t);
-  if (sq.length >= 3) { const suf = lista.filter(x => { const n = squash(x.n); return n === sq || n.endsWith(sq) || (sq.length >= 6 && n.includes(sq)); }); if (suf.length === 1) return suf[0].p; const ex = suf.find(x => squash(x.n) === sq); if (ex) return ex.p; if (suf.length > 1) return null; }
-  const tok = t.split(' ').filter(w => w.length > 2); if (!tok.length) return null;
-  const puntajes = lista.map(x => { const ntok = x.n.split(' ').filter(w => w.length > 2); if (!ntok.length) return { p: x.p, s: 0 }; let hit = 0; for (const o of tok) { let b = 0; for (const w of ntok) b = Math.max(b, simTok(o, w)); hit += b; } return { p: x.p, s: hit / tok.length * 0.6 + hit / ntok.length * 0.4, ntok }; });
+  if (sq.length >= 3) { const suf = lista.filter(x => { const n = squash(x.n); return n === sq || n.endsWith(sq) || (sq.length >= 6 && n.includes(sq)); }); if (suf.length === 1) return suf[0].p; if (suf.length > 1) return null; }
+  const tok = t.split(' ').filter(w => w.length > 1); if (!tok.length) return null;
+  const puntajes = lista.map(x => { const ntok = x.n.split(' ').filter(w => w.length > 1); if (!ntok.length) return { p: x.p, s: 0 }; let hit = 0; for (const o of tok) { let b = 0; for (const w of ntok) b = Math.max(b, simTok(o, w)); hit += b; }
+    const sinFalta = tok.filter(o => /^[XN]\d+$/.test(o)).every(o => ntok.includes(o)) && ntok.filter(w => /^[XN]\d+$/.test(w)).every(w => tok.includes(w));
+    return { p: x.p, s: (sinFalta ? 1 : 0.6) * (hit / tok.length * 0.6 + hit / ntok.length * 0.4), ntok }; });
   for (const o of tok) { if (o.length < 5) continue; const con = puntajes.filter(x => x.ntok && x.ntok.some(w => w.length >= 4 && simTok(o, w) >= 0.7)); if (con.length === 1) con[0].s += 0.4; }
   puntajes.sort((a, b) => b.s - a.s);
   const [b1, b2] = puntajes; if (!b1) return null;
@@ -938,18 +943,20 @@ function parsearLineas(texto, candidatos, mapeo) {
   const ok = [], dudas = [];
   for (let l of texto.split(/\n/)) {
     l = l.trim(); if (l.length < 6) continue;
-    let cod = null, nom = null, cant = null, fallback = false;
+    let cod = null, nom = null, cant = null, fallback = false, esPack = false;
+    const mf = l.match(/^(.+?)\s+\d{1,2}[.,]\d{2}\s*%\s+(\d{1,4})\b/);
     const m1 = l.match(/^[^\dA-Z]*(\d{5,8})\s+(.{3,}?)\s+(\d{1,4})\s*$/i);
     const marca = l.search(/\s(?:12|M2|22|2)\s*[A-Za-z]{2,3}\b|\s7[,.']?\s?800\b|\sL[tT]s\b|\sK[gG]\b/);
     const m2 = l.match(/(?:GRIDO|GR|K[gG]|Ke)[\s.\-:]*?(\d{1,4})\b/);
-    if (m1) { [, cod, nom, cant] = m1; }
+    if (mf) { nom = mf[1]; cant = mf[2]; esPack = /^\W*PACK/i.test(nom); }
+    else if (m1) { [, cod, nom, cant] = m1; }
     else if (marca > 0) { nom = l.slice(0, marca); cant = m2 ? m2[1] : null; }
     else { const m3 = l.match(/^[^A-Za-z]*([A-Za-z][A-Za-z .\/]{3,}?)\s+(\d{1,3})\b/); if (!m3) continue; nom = m3[1]; cant = m3[2]; fallback = true; }
     let p = null;
     if (cod && mapeo[cod]) p = candidatos.find(x => x.id === mapeo[cod]) || null;
     if (!p) p = buscarProductoPorTexto(nom, candidatos);
     const etiqueta = limpiarNombre(nom) || nom.trim();
-    if (p && cant && +cant > 0 && +cant < 1000) ok.push({ id: p.id, cant: +cant, txt: etiqueta });
+    if (p && cant && +cant > 0 && +cant < 1000) { const porPack = esPack ? ((p.equiv && p.equiv.cajasPorPack) || 1) : 1; ok.push({ id: p.id, cant: +cant * porPack, txt: etiqueta + (esPack ? ` · ${cant} pack${+cant > 1 ? 's' : ''} × ${porPack} cj` : '') }); }
     else if (p) dudas.push(etiqueta + ' (cantidad ilegible)');
     else if (!fallback && etiqueta.length >= 3) dudas.push(etiqueta + (cant ? ' (' + cant + ')' : ' (cantidad ilegible)'));
   }
@@ -964,13 +971,30 @@ function imagenPreparada(file) {
       g.putImageData(d, 0, 0); URL.revokeObjectURL(url); ok(c); };
     img.onerror = () => no(new Error('No se pudo abrir la imagen')); img.src = url; });
 }
+// PDF digital (factura o remito bajado de la intranet): se lee el texto directo, sin OCR
+async function textoDePdf(file) {
+  pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise;
+  const lineas = [];
+  for (let n = 1; n <= pdf.numPages; n++) {
+    const tc = await (await pdf.getPage(n)).getTextContent();
+    const filas = new Map();
+    for (const it of tc.items) { if (!it.str || !it.str.trim()) continue; const y = Math.round(it.transform[5] / 3); if (!filas.has(y)) filas.set(y, []); filas.get(y).push({ x: it.transform[4], s: it.str }); }
+    [...filas.entries()].sort((a, b) => b[0] - a[0]).forEach(([, its]) => lineas.push(its.sort((a, b) => a.x - b.x).map(i => i.s).join(' ').replace(/\s+/g, ' ').trim()));
+  }
+  return lineas.join('\n');
+}
 async function leerRemitoFoto() {
   const S = A.S, d = UI.params.draft; if (!d || !d.file) return toast('Primero sacá la foto del remito');
-  await cargarScript('https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.1/tesseract.min.js');
-  const canvas = await imagenPreparada(d.file);
-  const worker = await Tesseract.createWorker('spa', 1, { logger: m => { if (m.status === 'recognizing text') { const t = $('#toast'); t.textContent = 'Leyendo la foto… ' + Math.round(m.progress * 100) + ' %'; t.classList.add('show'); } } });
+  const esPdf = /pdf$/i.test(d.file.type) || /\.pdf$/i.test(d.file.name);
+  await cargarScript(esPdf ? 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js' : 'https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.1/tesseract.min.js');
   let texto = '';
-  try { const r = await worker.recognize(canvas); texto = r.data.text || ''; } finally { await worker.terminate(); }
+  if (/pdf$/i.test(d.file.type) || /\.pdf$/i.test(d.file.name)) texto = await textoDePdf(d.file);
+  else {
+    const canvas = await imagenPreparada(d.file);
+    const worker = await Tesseract.createWorker('spa', 1, { logger: m => { if (m.status === 'recognizing text') { const t = $('#toast'); t.textContent = 'Leyendo la foto… ' + Math.round(m.progress * 100) + ' %'; t.classList.add('show'); } } });
+    try { const r = await worker.recognize(canvas); texto = r.data.text || ''; } finally { await worker.terminate(); }
+  }
   const up = texto.toUpperCase();
   // Helacor provee a los dos depósitos: el destino se decide por lo que dice la hoja (Vía Bana / Heladería Social → Dep. Sociales; si no, Cámara)
   if (/HELACOR|GRIDO|V[IÍ]A\s*BANA/.test(up)) { const ph = S.proveedores.find(x => /helacor|grido/i.test(x.nombre)); if (ph) d.proveedorId = ph.id; }
@@ -980,8 +1004,8 @@ async function leerRemitoFoto() {
   if (puedeDestino && destino.id !== d.sucursalId) { d.sucursalId = destino.id; d.items = {}; }
   const cam = A.suc(d.sucursalId); const candidatos = S.productos.filter(p => p.activo && P.enSuc(p, cam.id));
   const { ok, dudas } = parsearLineas(texto, candidatos, S.mapeo);
-  const mNum = texto.match(/N[º°o]?\s*(\d{4,5})\s*[-–]\s*(\d{6,9})/); if (mNum && !d.numero) d.numero = mNum[1] + '-' + mNum[2];
-  const mFecha = texto.match(/\b(\d{2})\/(\d{2})\/(20\d{2})\b/); if (mFecha) d.fecha = `${mFecha[3]}-${mFecha[2]}-${mFecha[1]}`;
+  const mNum = texto.match(/N[º°o]?\s*(\d{4,5})\s*[-–]\s*(\d{6,9})/) || texto.match(/\b(\d{4,5})-(\d{8})\b/); if (mNum && !d.numero) d.numero = mNum[1] + '-' + mNum[2];
+  const mFecha = texto.match(/\b(\d{2})[\/.](\d{2})[\/.](20\d{2})\b/); if (mFecha) d.fecha = `${mFecha[3]}-${mFecha[2]}-${mFecha[1]}`;
   const mTot = texto.match(/TOTAL[:\s]*(\d{1,5})\b/i); const total = mTot ? +mTot[1] : null;
   for (const l of ok) d.items[l.id] = (d.items[l.id] || 0) + l.cant;
   d.ocr = { ok, dudas, total, destino: A.suc(d.sucursalId).nombre, pista: esSocial ? 'la hoja menciona Vía Bana / Heladería Social' : 'la hoja no menciona Vía Bana' };
