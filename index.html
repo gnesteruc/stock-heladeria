@@ -347,7 +347,7 @@ async function cambiarEstadoPedido(p, estado) {
     const f = iso(HOY); const movs = [];
     for (const it of p.items) {
       const pr = prod(it.productoId); const rec = it.recibida ?? it.preparada ?? it.pedida; it.recibida = rec; it.base = aBase(pr, rec, it.unidad, f);
-      if (it.base > 0) { movs.push({ sucursalId: p.destino, productoId: pr.id, tipo: 'transferencia_salida', cantidad: -it.base, fecha: f, ref: 'Pedido #' + p.numero }); movs.push({ sucursalId: p.origen, productoId: pr.id, tipo: 'transferencia_entrada', cantidad: it.base, fecha: f, ref: 'Pedido #' + p.numero }); }
+      if (it.base > 0) { movs.push({ sucursalId: p.destino, productoId: pr.id, tipo: 'transferencia_salida', cantidad: -it.base, fecha: f, ref: 'Pedido #' + p.numero }); if ((suc(p.origen) || {}).tipo !== 'externo') movs.push({ sucursalId: p.origen, productoId: pr.id, tipo: 'transferencia_entrada', cantidad: it.base, fecha: f, ref: 'Pedido #' + p.numero }); }
     }
     await insertarMovs(movs);
   }
@@ -407,11 +407,17 @@ const $ = sel => document.querySelector(sel);
 const app = $('#app'), nav = $('#nav'), navin = $('#navin');
 
 const puede = perm => UI.user && PERMISOS[UI.user.rol].includes(perm);
-const misSucursales = () => UI.user.sucursales.map(A.suc);
+const misSucursales = () => UI.user.sucursales.map(A.suc).filter(s => s && s.tipo !== 'externo');
 const miLocal = () => misSucursales().find(s => s.tipo === 'local') || misSucursales()[0];
+// Flujos de pedido: cada local pide a la cámara; los emprendedores de heladerías sociales (sucursal "externa", sin stock propio) piden al Dep. Sociales
+const flujosPedido = () => { const S = A.S, u = UI.user, todas = u.rol === 'administrador', out = [];
+  const cam = S.sucursales.find(x => x.tipo === 'deposito' && !/social/i.test(x.nombre)), soc = S.sucursales.find(x => x.tipo === 'deposito' && /social/i.test(x.nombre));
+  for (const x of S.sucursales) { if (x.tipo === 'local' && cam && (todas || u.sucursales.includes(x.id))) out.push({ origen: x, destino: cam }); if (x.tipo === 'externo' && soc && (todas || u.sucursales.includes(x.id))) out.push({ origen: x, destino: soc }); }
+  return out; };
+const esExterno = sucId => (A.suc(sucId) || {}).tipo === 'externo';
 const localesVisibles = () => A.S.sucursales.filter(s => s.tipo === 'local' && (UI.user.rol === 'administrador' || UI.user.sucursales.includes(s.id)));
 const ESTADO = { solicitado: ['Solicitado', 'azul'], en_preparacion: ['En preparación', 'ambar'], enviado: ['Enviado', 'ambar'], recibido: ['Recibido', 'verde'], cancelado: ['Cancelado', 'gris'] };
-const TIPO_MOV = { ingreso_remito: 'Ingreso remito', transferencia_salida: 'Salida a local', transferencia_entrada: 'Entrada de cámara', venta: 'Venta', ajuste_inventario: 'Ajuste inventario', merma: 'Merma' };
+const TIPO_MOV = { ingreso_remito: 'Ingreso remito', transferencia_salida: 'Salida por pedido', transferencia_entrada: 'Entrada de cámara', venta: 'Venta', ajuste_inventario: 'Ajuste inventario', merma: 'Merma' };
 
 let toastT;
 function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), 2400); }
@@ -599,23 +605,24 @@ function vPedidos() {
   const mios = S.pedidos.filter(p => u.rol === 'administrador' || u.sucursales.includes(p.origen) || u.sucursales.includes(p.destino)).sort((a, b) => b.numero - a.numero);
   const abiertos = mios.filter(p => p.estado !== 'recibido' && p.estado !== 'cancelado');
   const cerrados = mios.filter(p => p.estado === 'recibido' || p.estado === 'cancelado').slice(0, 12);
-  const item = p => { const [t, c] = ESTADO[p.estado]; return `<div class="item" data-go="pedido-detalle" data-id="${p.id}"><div class="grow"><div class="t">Pedido #${p.numero} · ${A.suc(p.origen).nombre}</div><div class="s">${p.items.length} productos · ${p.hist[p.hist.length - 1].en} · ${esc(p.hist[p.hist.length - 1].por)}</div></div><span class="pill ${c}">${t}</span></div>`; };
+  const item = p => { let [t, c] = ESTADO[p.estado]; if (p.estado === 'recibido' && esExterno(p.origen)) t = 'Entregado'; return `<div class="item" data-go="pedido-detalle" data-id="${p.id}"><div class="grow"><div class="t">Pedido #${p.numero} · ${A.suc(p.origen).nombre}</div><div class="s">${p.items.length} productos · ${p.hist[p.hist.length - 1].en} · ${esc(p.hist[p.hist.length - 1].por)}</div></div><span class="pill ${c}">${t}</span></div>`; };
   return header('Pedidos') + `<main>
-  ${puede('pedido.crear') && miLocal().tipo === 'local' ? `<button class="btn primary block" data-go="pedido-nuevo" style="margin-bottom:12px">+ Nuevo pedido a cámara</button>` : ''}
+  ${puede('pedido.crear') && flujosPedido().length ? `<button class="btn primary block" data-go="pedido-nuevo" style="margin-bottom:12px">+ Nuevo pedido</button>` : ''}
   <div class="card"><h2>En curso</h2><div class="list">${abiertos.length ? abiertos.map(item).join('') : '<p class="muted small">No hay pedidos en curso.</p>'}</div></div>
   <div class="card"><h2>Recibidos</h2><div class="list">${cerrados.map(item).join('')}</div></div></main>`;
 }
 function vPedidoNuevo() {
-  const S = A.S, loc = miLocal();
-  const d = UI.params.draft || (UI.params.draft = { items: {}, notas: '' });
-  const cam = S.sucursales.find(s => s.tipo === 'deposito');
+  const S = A.S, flujos = flujosPedido(); if (!flujos.length) return go('pedidos');
+  const d = UI.params.draft || (UI.params.draft = { items: {}, notas: '', flujo: 0 });
+  const idx = Math.min(d.flujo || 0, flujos.length - 1), { origen: loc, destino: cam } = flujos[idx], externo = loc.tipo === 'externo';
   const fila = p => { const v = d.items[p.id] || 0; const enCam = cajasDe(p, A.stock(cam.id, p.id)); const enLoc = cajasDe(p, A.stock(loc.id, p.id));
-    return `<div class="item" style="cursor:default" ${dn(p)}><div class="grow"><div class="t">${esc(p.nombre)}</div><div class="s">Cámara: ${enCam.toFixed(enCam % 1 ? 1 : 0)} cj · mi local: ${enLoc.toFixed(enLoc % 1 ? 1 : 0)} cj${p.ideal[loc.id] ? ` · ideal ${p.ideal[loc.id]}` : ''}</div></div>
+    return `<div class="item" style="cursor:default" ${dn(p)}><div class="grow"><div class="t">${esc(p.nombre)}</div><div class="s">${esc(cam.nombre)}: ${enCam.toFixed(enCam % 1 ? 1 : 0)} cj${externo ? '' : ` · mi local: ${enLoc.toFixed(enLoc % 1 ? 1 : 0)} cj`}${p.ideal[loc.id] ? ` · ideal ${p.ideal[loc.id]}` : ''}</div></div>
     <div class="qty"><button class="btn sm" data-qty="${p.id}" data-d="-1" aria-label="menos">−</button><input type="number" min="0" step="1" id="q_${p.id}" value="${v}" data-qin="${p.id}" inputmode="numeric" aria-label="cajas de ${esc(p.nombre)}"><button class="btn sm" data-qty="${p.id}" data-d="1" aria-label="más">+</button></div></div>`; };
   const total = Object.values(d.items).reduce((a, b) => a + b, 0);
   const act = S.productos.filter(p => p.activo && P.enSuc(p, cam.id));
   return header('Nuevo pedido', 'pedidos') + `<main>
-  <div class="note" style="margin-bottom:10px">Pedís en <b>cajas</b> desde ${esc(loc.nombre)} a ${esc(cam.nombre)}. El stock se ajusta recién cuando confirmes la recepción.</div>
+  ${flujos.length > 1 ? `<div class="card"><label class="f" style="margin:0"><span>Pedido</span><select id="pf_flujo">${flujos.map((f, i) => `<option value="${i}" ${i === idx ? 'selected' : ''}>${esc(f.origen.nombre)} → ${esc(f.destino.nombre)}</option>`).join('')}</select></label></div>` : ''}
+  <div class="note" style="margin-bottom:10px">${externo ? `Pedido en <b>cajas</b> para los <b>${esc(loc.nombre)}</b>, que lo retiran en ${esc(cam.nombre)}. El stock del depósito se descuenta cuando el depósito lo marca como entregado.` : `Pedís en <b>cajas</b> desde ${esc(loc.nombre)} a ${esc(cam.nombre)}. El stock se ajusta recién cuando confirmes la recepción.`}</div>
   ${buscador()}
   ${seccion('Helado a granel', act.filter(p => p.grupo === 'helado_granel'), fila, true)}
   ${seccion('Impulsivos', act.filter(p => p.grupo === 'impulsivo'), fila, false)}
@@ -625,7 +632,7 @@ function vPedidoNuevo() {
 }
 function vPedidoDetalle() {
   const S = A.S, p = S.pedidos.find(x => x.id === UI.params.id); if (!p) return go('pedidos');
-  const u = UI.user, [t, c] = ESTADO[p.estado];
+  const u = UI.user, externo = esExterno(p.origen); let [t, c] = ESTADO[p.estado]; if (externo && p.estado === 'recibido') t = 'Entregado';
   const esDeposito = puede('pedido.preparar') && (u.rol === 'administrador' || u.sucursales.includes(p.destino));
   const esLocal = puede('pedido.recibir') && (u.rol === 'administrador' || u.sucursales.includes(p.origen));
   const editable = (p.estado === 'solicitado' || p.estado === 'en_preparacion') && esDeposito ? 'preparada' : p.estado === 'enviado' && esLocal ? 'recibida' : null;
@@ -636,9 +643,10 @@ function vPedidoDetalle() {
   const wa = (num) => { const txt = encodeURIComponent(`Pedido #${p.numero} de ${A.suc(p.origen).nombre}: ${p.items.map(i => `${i.preparada ?? i.pedida} cj ${A.prod(i.productoId).nombre}`).join(', ')}. Solo aviso, el registro es en la app.`); return `https://wa.me/${num}?text=${txt}`; };
   let acciones = '';
   if (p.estado === 'solicitado' && esDeposito) acciones = `<button class="btn primary block" data-estado="en_preparacion">Empezar a preparar</button>`;
-  else if (p.estado === 'en_preparacion' && esDeposito) acciones = `<button class="btn primary block" data-estado="enviado">Marcar como enviado</button><a class="btn wa block" target="_blank" rel="noopener" href="${wa(A.suc(p.origen).tel)}">Avisar por WhatsApp al local</a>`;
+  else if (p.estado === 'en_preparacion' && esDeposito && externo) acciones = `<button class="btn primary block" data-estado="recibido">Entregado a los emprendedores · descontar stock</button>`;
+  else if (p.estado === 'en_preparacion' && esDeposito) acciones = `<button class="btn primary block" data-estado="enviado">Marcar como enviado</button>${A.suc(p.origen).tel ? `<a class="btn wa block" target="_blank" rel="noopener" href="${wa(A.suc(p.origen).tel)}">Avisar por WhatsApp al local</a>` : ''}`;
   else if (p.estado === 'enviado' && esLocal) acciones = `<button class="btn primary block" data-estado="recibido">Confirmar recepción y ajustar stock</button>`;
-  else if (p.estado === 'solicitado' && esLocal) acciones = `<a class="btn wa block" target="_blank" rel="noopener" href="${wa(A.suc(p.destino).tel)}">Avisar por WhatsApp a cámara</a><button class="btn ghost block" data-estado="cancelado">Cancelar pedido</button>`;
+  else if (p.estado === 'solicitado' && esLocal) acciones = `${A.suc(p.destino).tel ? `<a class="btn wa block" target="_blank" rel="noopener" href="${wa(A.suc(p.destino).tel)}">Avisar por WhatsApp a ${esc(A.suc(p.destino).nombre)}</a>` : ''}<button class="btn ghost block" data-estado="cancelado">Cancelar pedido</button>`;
   return header('Pedido #' + p.numero, 'pedidos') + `<main>
   <div class="card"><div class="row between"><div><div class="t" style="font-weight:600">${esc(A.suc(p.origen).nombre)} ← ${esc(A.suc(p.destino).nombre)}</div><div class="small muted">${p.notas ? esc(p.notas) : 'Sin notas'}</div></div><span class="pill ${c}">${t}</span></div></div>
   <div class="card"><div class="tablewrap"><table><tr><th>Producto</th><th class="n">Pedido</th><th class="n">Prep.</th><th class="n">Recib.</th></tr>${filas}</table></div><p class="tiny muted" style="margin:8px 0 0">Cantidades en cajas. Debajo de cada producto, la conversión a ${'kg / unidades'} con el peso promedio vigente.</p></div>
@@ -731,7 +739,7 @@ function vInventarioDetalle() {
 
 // ============================================================ STOCK
 function vStock() {
-  const S = A.S, locs = UI.user.rol === 'administrador' ? S.sucursales : misSucursales();
+  const S = A.S, locs = UI.user.rol === 'administrador' ? S.sucursales.filter(x => x.tipo !== 'externo') : misSucursales();
   const sel = UI.params.suc || locs[0].id;
   const esDep = A.suc(sel).tipo === 'deposito';
   const fila = p => { const st = A.stock(sel, p.id); const cj = cajasDe(p, st); const base = `${(p.grupo === 'helado_granel' ? fmtKg : fmtN)(st)} ${unidadBaseLabel(p)}`; return `<div class="item" style="cursor:default" ${dn(p)}><div class="grow"><div class="t">${esc(p.nombre)}</div></div><div class="r">${esDep ? `<div class="num">${fmtDep(p, st)}</div><div class="tiny muted">${base}</div>` : `<div class="num">${base}</div><div class="tiny muted">≈ ${cj.toFixed(1)} cj</div>`}</div></div>`; };
@@ -783,7 +791,7 @@ function vProductoDetalle() {
     ${edit ? `<div class="row" style="margin-top:10px"><input type="number" step="0.01" min="0" id="np_kg" placeholder="nuevo peso kg" inputmode="decimal"><input type="date" id="np_desde" value="${iso(HOY)}"><button class="btn sm" id="np_add">Agregar</button></div><p class="tiny muted" style="margin:6px 0 0">Los remitos e inventarios anteriores conservan el peso que tenían al momento de cargarse.</p>` : ''}</div>`;
   else body = `<div class="card"><h2>Equivalencias</h2><div class="grid2"><label class="f"><span>Unidades por caja</span><input type="number" min="1" id="eq_u" value="${p.equiv.unidadesPorCaja}" ${edit ? '' : 'disabled'}></label><label class="f"><span>Cajas por pack</span><input type="number" min="1" id="eq_p" value="${p.equiv.cajasPorPack}" ${edit ? '' : 'disabled'}></label></div><div class="note">1 caja = ${p.equiv.unidadesPorCaja} unidades · 1 pack = ${p.equiv.cajasPorPack} cajas = ${p.equiv.cajasPorPack * p.equiv.unidadesPorCaja} unidades. Se carga una vez; remitos, pedidos e inventario convierten solos.${p.equiv.detectado ? ' Tomado de la planilla del sistema (unidades por bulto).' : ' <b>Falta confirmar:</b> se asumió 1 unidad por caja.'}</div>${edit ? '<button class="btn block" id="eq_save" style="margin-top:10px">Guardar equivalencias</button>' : ''}</div>`;
   return header(p.nombre, 'productos') + `<main><div class="card"><div class="row between"><span class="pill azul">${P.GRUPO_LABEL[p.grupo]} · ${esc(titulo(p.categoria))}</span><span class="small muted">Código Smartfram: <b class="mono">${esc(p.codigoExt)}</b></span></div></div>${body}
-  <div class="card"><h2>Stock teórico ahora</h2>${S.sucursales.map(s => `<div class="row between small" style="padding:4px 0"><span>${esc(s.nombre)}</span><span class="num">${s.tipo === 'deposito' ? fmtDep(p, A.stock(s.id, p.id)) : `${(p.grupo === 'helado_granel' ? fmtKg : fmtN)(A.stock(s.id, p.id))} ${unidadBaseLabel(p)}`}</span></div>`).join('')}</div></main>`;
+  <div class="card"><h2>Stock teórico ahora</h2>${S.sucursales.filter(x => x.tipo !== 'externo').map(s => `<div class="row between small" style="padding:4px 0"><span>${esc(s.nombre)}</span><span class="num">${s.tipo === 'deposito' ? fmtDep(p, A.stock(s.id, p.id)) : `${(p.grupo === 'helado_granel' ? fmtKg : fmtN)(A.stock(s.id, p.id))} ${unidadBaseLabel(p)}`}</span></div>`).join('')}</div></main>`;
 }
 function vVentas() {
   const S = A.S, d = UI.params.draft || (UI.params.draft = { sucursalId: miLocal().id, filas: null, nombre: '' });
@@ -812,7 +820,7 @@ function vConfig() {
   <div class="row" style="gap:14px;font-size:13px"><span><span class="dot verde"></span>≤ ${S.config.umbralAmbar} %</span><span><span class="dot ambar"></span>hasta ${S.config.umbralRojo} %</span><span><span class="dot rojo"></span>más de ${S.config.umbralRojo} %</span></div>
   <label class="f" style="margin-top:10px"><span>Precio de referencia por kg (para valorizar desvíos)</span><input type="number" step="1" min="0" id="c_precio" value="${S.config.precioKgRef}" inputmode="numeric"></label>
   <button class="btn primary block" id="c_save">Guardar</button></div>
-  <div class="card"><h2>Sucursales</h2><div class="list">${S.sucursales.map(s => `<div class="item" style="cursor:default"><div class="grow"><div class="t">${esc(s.nombre)}</div><div class="s">${s.tipo === 'local' ? 'Local' : 'Depósito'} · WhatsApp +${s.tel}</div></div></div>`).join('')}</div><p class="tiny muted" style="margin:8px 0 0">Dos locales y dos depósitos. Agregar otra sucursal no requiere cambios en el modelo.</p></div>
+  <div class="card"><h2>Sucursales</h2><div class="list">${S.sucursales.map(s => `<div class="item" style="cursor:default"><div class="grow"><div class="t">${esc(s.nombre)}</div><div class="s">${s.tipo === 'local' ? 'Local' : s.tipo === 'deposito' ? 'Depósito' : 'Retira mercadería (sin stock propio)'}${s.tel ? ' · WhatsApp +' + s.tel : ''}</div></div></div>`).join('')}</div><p class="tiny muted" style="margin:8px 0 0">Dos locales y dos depósitos. Agregar otra sucursal no requiere cambios en el modelo.</p></div>
   <div class="card"><h2>Fuera de esta etapa</h2><p class="small muted" style="margin:0">Contabilidad, caja y finanzas no forman parte de la app.</p></div></main>`;
 }
 function vUsuarios() {
@@ -851,14 +859,14 @@ document.addEventListener('click', e => {
   if (d.stocksuc) { UI.params.suc = d.stocksuc; render(); return; }
   if (d.qty) { const it = UI.params.draft.items; it[d.qty] = Math.max(0, (it[d.qty] || 0) + (+d.d)); render(); return; }
   if (t.id === 'crearPedido') {
-    const dr = UI.params.draft, loc = miLocal(), cam = S.sucursales.find(s => s.tipo === 'deposito');
+    const dr = UI.params.draft, flujos = flujosPedido(), fl = flujos[Math.min(dr.flujo || 0, flujos.length - 1)], loc = fl.origen, cam = fl.destino;
     const items = Object.entries(dr.items).filter(([, v]) => v > 0).map(([productoId, pedida]) => ({ productoId, unidad: 'caja', pedida }));
     const notas = $('#notas').value.trim();
-    ocupado(async () => { const p = await A.crearPedido(loc.id, cam.id, items, notas); toast('Pedido #' + p.numero + ' enviado a cámara'); go('pedidos'); }, 'Enviando pedido…'); return;
+    ocupado(async () => { const p = await A.crearPedido(loc.id, cam.id, items, notas); toast('Pedido #' + p.numero + ' enviado a ' + cam.nombre); go('pedidos'); }, 'Enviando pedido…'); return;
   }
   if (d.estado) {
     const p = S.pedidos.find(x => x.id === UI.params.id);
-    if (d.estado === 'en_preparacion' || d.estado === 'enviado') { document.querySelectorAll('[data-prep]').forEach(i => { const it = p.items.find(x => x.productoId === i.dataset.prep); it.preparada = Math.max(0, +i.value || 0); }); if (d.estado === 'en_preparacion') p.items.forEach(it => { if (it.preparada === undefined) it.preparada = it.pedida; }); }
+    document.querySelectorAll('[data-prep]').forEach(i => { const it = p.items.find(x => x.productoId === i.dataset.prep); it.preparada = Math.max(0, +i.value || 0); }); if (d.estado === 'en_preparacion') p.items.forEach(it => { if (it.preparada === undefined) it.preparada = it.pedida; });
     if (d.estado === 'recibido') { document.querySelectorAll('[data-rec]').forEach(i => { const it = p.items.find(x => x.productoId === i.dataset.rec); it.recibida = Math.max(0, +i.value || 0); }); }
     ocupado(async () => { await A.cambiarEstadoPedido(p, d.estado); commit(d.estado === 'recibido' ? 'Recepción confirmada: stock actualizado en ' + A.suc(p.origen).nombre : ESTADO[d.estado][0]); }, 'Guardando…');
     return;
@@ -908,6 +916,7 @@ document.addEventListener('input', e => {
   if (t.id === 'r_prov') UI.params.draft.proveedorId = t.value;
   if (t.id === 'r_suc') { UI.params.draft.sucursalId = t.value; UI.params.draft.items = {}; render(); }
   if (t.id === 'imp_suc') UI.params.draft.sucursalId = t.value;
+  if (t.id === 'pf_flujo') { UI.params.draft.flujo = +t.value; UI.params.draft.items = {}; render(); }
 });
 function refreshRemitoBtn() { const d = UI.params.draft; const total = Object.values(d.items).reduce((a, b) => a + b, 0); const ok = d.numero && d.fecha && d.archivo && total > 0; const b = $('#confRemito'); if (b) { b.disabled = !ok; b.textContent = `Confirmar ingreso (${total} cajas)`; } }
 document.addEventListener('change', e => {
