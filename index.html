@@ -415,6 +415,10 @@ const flujosPedido = () => { const S = A.S, u = UI.user, todas = u.rol === 'admi
   for (const x of S.sucursales) { if (x.tipo === 'local' && cam && (todas || u.sucursales.includes(x.id))) out.push({ origen: x, destino: cam }); if (x.tipo === 'externo' && soc && (todas || u.sucursales.includes(x.id))) out.push({ origen: x, destino: soc }); }
   return out; };
 const esExterno = sucId => (A.suc(sucId) || {}).tipo === 'externo';
+// Unidades en que se puede pedir cada producto: pack (si el pack trae más de una caja), caja, y unidad suelta para Frizzio y líneas especiales
+const PEDIDO_UNIDAD_CATS = ['FRIZIO', 'SIN AZUCAR', 'YOGURT SIN TACC', 'POSTRE VEGANO'];
+const UNI_ABR = { pack: 'pk', caja: 'cj', unidad: 'u' };
+function unidadesPedido(p) { if (p.grupo === 'helado_granel' || !p.equiv) return ['caja']; const out = []; if (p.equiv.cajasPorPack > 1) out.push('pack'); out.push('caja'); if (PEDIDO_UNIDAD_CATS.includes(String(p.categoria).toUpperCase()) && p.equiv.unidadesPorCaja > 1) out.push('unidad'); return out; }
 const localesVisibles = () => A.S.sucursales.filter(s => s.tipo === 'local' && (UI.user.rol === 'administrador' || UI.user.sucursales.includes(s.id)));
 const ESTADO = { solicitado: ['Solicitado', 'azul'], en_preparacion: ['En preparación', 'ambar'], enviado: ['Enviado', 'ambar'], recibido: ['Recibido', 'verde'], cancelado: ['Cancelado', 'gris'] };
 const TIPO_MOV = { ingreso_remito: 'Ingreso remito', transferencia_salida: 'Salida por pedido', transferencia_entrada: 'Entrada de cámara', venta: 'Venta', ajuste_inventario: 'Ajuste inventario', merma: 'Merma' };
@@ -617,18 +621,18 @@ function vPedidoNuevo() {
   const idx = Math.min(d.flujo || 0, flujos.length - 1), { origen: loc, destino: cam } = flujos[idx], externo = loc.tipo === 'externo';
   const fila = p => { const v = d.items[p.id] || 0; const enCam = cajasDe(p, A.stock(cam.id, p.id)); const enLoc = cajasDe(p, A.stock(loc.id, p.id));
     return `<div class="item" style="cursor:default" ${dn(p)}><div class="grow"><div class="t">${esc(p.nombre)}</div><div class="s">${esc(cam.nombre)}: ${enCam.toFixed(enCam % 1 ? 1 : 0)} cj${externo ? '' : ` · mi local: ${enLoc.toFixed(enLoc % 1 ? 1 : 0)} cj`}${p.ideal[loc.id] ? ` · ideal ${p.ideal[loc.id]}` : ''}</div></div>
-    <div class="qty"><button class="btn sm" data-qty="${p.id}" data-d="-1" aria-label="menos">−</button><input type="number" min="0" step="1" id="q_${p.id}" value="${v}" data-qin="${p.id}" inputmode="numeric" aria-label="cajas de ${esc(p.nombre)}"><button class="btn sm" data-qty="${p.id}" data-d="1" aria-label="más">+</button></div></div>`; };
-  const total = Object.values(d.items).reduce((a, b) => a + b, 0);
+    <div class="qty"><button class="btn sm" data-qty="${p.id}" data-d="-1" aria-label="menos">−</button><input type="number" min="0" step="1" id="q_${p.id}" value="${v}" data-qin="${p.id}" inputmode="numeric" aria-label="cantidad de ${esc(p.nombre)}"><button class="btn sm" data-qty="${p.id}" data-d="1" aria-label="más">+</button>${(() => { const us = unidadesPedido(p), u = (d.uni || {})[p.id] || 'caja'; return us.length > 1 ? `<select data-uni="${p.id}" aria-label="unidad" style="width:auto;min-height:38px;padding:6px">${us.map(x => `<option value="${x}" ${x === u ? 'selected' : ''}>${UNI_ABR[x]}</option>`).join('')}</select>` : '<span class="small muted">cj</span>'; })()}</div></div>`; };
+  const total = Object.values(d.items).filter(v => v > 0).length;
   const act = S.productos.filter(p => p.activo && P.enSuc(p, cam.id));
   return header('Nuevo pedido', 'pedidos') + `<main>
   ${flujos.length > 1 ? `<div class="card"><label class="f" style="margin:0"><span>Pedido</span><select id="pf_flujo">${flujos.map((f, i) => `<option value="${i}" ${i === idx ? 'selected' : ''}>${esc(f.origen.nombre)} → ${esc(f.destino.nombre)}</option>`).join('')}</select></label></div>` : ''}
-  <div class="note" style="margin-bottom:10px">${externo ? `Pedido en <b>cajas</b> para los <b>${esc(loc.nombre)}</b>, que lo retiran en ${esc(cam.nombre)}. El stock del depósito se descuenta cuando el depósito lo marca como entregado.` : `Pedís en <b>cajas</b> desde ${esc(loc.nombre)} a ${esc(cam.nombre)}. El stock se ajusta recién cuando confirmes la recepción.`}</div>
+  <div class="note" style="margin-bottom:10px">${externo ? `Pedido por caja (o pack / unidad según el producto) para los <b>${esc(loc.nombre)}</b>, que lo retiran en ${esc(cam.nombre)}. El stock del depósito se descuenta cuando el depósito lo marca como entregado.` : `Pedís por <b>caja</b>, o por <b>pack</b> / <b>unidad</b> donde aparece el selector, desde ${esc(loc.nombre)} a ${esc(cam.nombre)}. El stock se ajusta recién cuando confirmes la recepción.`}</div>
   ${buscador()}
   ${seccion('Helado a granel', act.filter(p => p.grupo === 'helado_granel'), fila, true)}
   ${seccion('Impulsivos', act.filter(p => p.grupo === 'impulsivo'), fila, false)}
   ${seccion('Insumos', act.filter(p => p.grupo === 'insumo'), fila, false)}
   <div class="card"><label class="f"><span>Notas para el depósito</span><input type="text" id="notas" value="${esc(d.notas)}" placeholder="Ej.: urgente para el fin de semana"></label>
-  <button class="btn primary block" id="crearPedido" ${total ? '' : 'disabled'}>Enviar pedido (${total} cajas)</button></div></main>`;
+  <button class="btn primary block" id="crearPedido" ${total ? '' : 'disabled'}>Enviar pedido (${total} producto${total === 1 ? '' : 's'})</button></div></main>`;
 }
 function vPedidoDetalle() {
   const S = A.S, p = S.pedidos.find(x => x.id === UI.params.id); if (!p) return go('pedidos');
@@ -637,10 +641,10 @@ function vPedidoDetalle() {
   const esLocal = puede('pedido.recibir') && (u.rol === 'administrador' || u.sucursales.includes(p.origen));
   const editable = (p.estado === 'solicitado' || p.estado === 'en_preparacion') && esDeposito ? 'preparada' : p.estado === 'enviado' && esLocal ? 'recibida' : null;
   const filas = p.items.map(it => { const pr = A.prod(it.productoId); const base = aBase(pr, it.recibida ?? it.preparada ?? it.pedida, it.unidad);
-    return `<tr><td>${esc(pr.nombre)}<div class="tiny muted">${fmtKg(base)} ${unidadBaseLabel(pr)}</div></td><td class="n">${it.pedida}</td>
+    return `<tr><td>${esc(pr.nombre)}<div class="tiny muted">en ${{ pack: 'packs', caja: 'cajas', unidad: 'unidades' }[it.unidad] || 'cajas'} · ${fmtKg(base)} ${unidadBaseLabel(pr)}</div></td><td class="n">${it.pedida} ${UNI_ABR[it.unidad] || 'cj'}</td>
     <td class="n">${editable === 'preparada' ? `<input type="number" min="0" step="1" style="width:70px;min-height:36px;padding:6px" value="${it.preparada ?? it.pedida}" data-prep="${it.productoId}" inputmode="numeric">` : (it.preparada ?? '—')}</td>
     <td class="n">${editable === 'recibida' ? `<input type="number" min="0" step="1" style="width:70px;min-height:36px;padding:6px" value="${it.recibida ?? it.preparada ?? it.pedida}" data-rec="${it.productoId}" inputmode="numeric">` : (it.recibida ?? '—')}</td></tr>`; }).join('');
-  const wa = (num) => { const txt = encodeURIComponent(`Pedido #${p.numero} de ${A.suc(p.origen).nombre}: ${p.items.map(i => `${i.preparada ?? i.pedida} cj ${A.prod(i.productoId).nombre}`).join(', ')}. Solo aviso, el registro es en la app.`); return `https://wa.me/${num}?text=${txt}`; };
+  const wa = (num) => { const txt = encodeURIComponent(`Pedido #${p.numero} de ${A.suc(p.origen).nombre}: ${p.items.map(i => `${i.preparada ?? i.pedida} ${UNI_ABR[i.unidad] || 'cj'} ${A.prod(i.productoId).nombre}`).join(', ')}. Solo aviso, el registro es en la app.`); return `https://wa.me/${num}?text=${txt}`; };
   let acciones = '';
   if (p.estado === 'solicitado' && esDeposito) acciones = `<button class="btn primary block" data-estado="en_preparacion">Empezar a preparar</button>`;
   else if (p.estado === 'en_preparacion' && esDeposito && externo) acciones = `<button class="btn primary block" data-estado="recibido">Entregado a los emprendedores · descontar stock</button>`;
@@ -649,7 +653,7 @@ function vPedidoDetalle() {
   else if (p.estado === 'solicitado' && esLocal) acciones = `${A.suc(p.destino).tel ? `<a class="btn wa block" target="_blank" rel="noopener" href="${wa(A.suc(p.destino).tel)}">Avisar por WhatsApp a ${esc(A.suc(p.destino).nombre)}</a>` : ''}<button class="btn ghost block" data-estado="cancelado">Cancelar pedido</button>`;
   return header('Pedido #' + p.numero, 'pedidos') + `<main>
   <div class="card"><div class="row between"><div><div class="t" style="font-weight:600">${esc(A.suc(p.origen).nombre)} ← ${esc(A.suc(p.destino).nombre)}</div><div class="small muted">${p.notas ? esc(p.notas) : 'Sin notas'}</div></div><span class="pill ${c}">${t}</span></div></div>
-  <div class="card"><div class="tablewrap"><table><tr><th>Producto</th><th class="n">Pedido</th><th class="n">Prep.</th><th class="n">Recib.</th></tr>${filas}</table></div><p class="tiny muted" style="margin:8px 0 0">Cantidades en cajas. Debajo de cada producto, la conversión a ${'kg / unidades'} con el peso promedio vigente.</p></div>
+  <div class="card"><div class="tablewrap"><table><tr><th>Producto</th><th class="n">Pedido</th><th class="n">Prep.</th><th class="n">Recib.</th></tr>${filas}</table></div><p class="tiny muted" style="margin:8px 0 0">Cantidades en la unidad pedida (cj = caja, pk = pack, u = unidad). Debajo de cada producto, la conversión a kg o unidades.</p></div>
   ${acciones ? `<div class="stack" style="margin-bottom:12px">${acciones}</div>` : ''}
   <div class="card"><h2>Historial</h2>${p.hist.map(h => `<div class="row between small" style="padding:4px 0"><span>${ESTADO[h.e][0]}</span><span class="muted">${h.en} · ${esc(h.por)}</span></div>`).join('')}</div></main>`;
 }
@@ -860,7 +864,7 @@ document.addEventListener('click', e => {
   if (d.qty) { const it = UI.params.draft.items; it[d.qty] = Math.max(0, (it[d.qty] || 0) + (+d.d)); render(); return; }
   if (t.id === 'crearPedido') {
     const dr = UI.params.draft, flujos = flujosPedido(), fl = flujos[Math.min(dr.flujo || 0, flujos.length - 1)], loc = fl.origen, cam = fl.destino;
-    const items = Object.entries(dr.items).filter(([, v]) => v > 0).map(([productoId, pedida]) => ({ productoId, unidad: 'caja', pedida }));
+    const items = Object.entries(dr.items).filter(([, v]) => v > 0).map(([productoId, pedida]) => ({ productoId, unidad: (dr.uni || {})[productoId] || 'caja', pedida }));
     const notas = $('#notas').value.trim();
     ocupado(async () => { const p = await A.crearPedido(loc.id, cam.id, items, notas); toast('Pedido #' + p.numero + ' enviado a ' + cam.nombre); go('pedidos'); }, 'Enviando pedido…'); return;
   }
@@ -905,6 +909,7 @@ document.addEventListener('click', e => {
 document.addEventListener('input', e => {
   const t = e.target, d = t.dataset;
   if (d.qin) UI.params.draft.items[d.qin] = Math.max(0, +t.value || 0);
+  if (d.uni) { const dr = UI.params.draft; (dr.uni || (dr.uni = {}))[d.uni] = t.value; }
   if (d.rin) { UI.params.draft.items[d.rin] = Math.max(0, +t.value || 0); refreshRemitoBtn(); }
   if (d.icin) { const it = UI.params.draft.items[d.icin]; it.cajasCerradas = Math.max(0, +t.value || 0); const tot = document.querySelector(`[data-tot="${d.icin}"]`); if (tot) tot.textContent = esDeposito(UI.params.draft.sucursalId) ? it.cajasCerradas + ' cj' : P.fmtKg(it.cajasCerradas * pesoVigente(A.prod(d.icin), UI.params.draft.fecha) + it.pesadas.reduce((a, b) => a + (+b || 0), 0)) + ' kg'; }
   if (d.pesi) { const ps = UI.params.draft.items[d.pesi].pesadas; while (ps.length <= +d.i) ps.push(''); ps[+d.i] = t.value === '' ? '' : Math.max(0, parseFloat(t.value) || 0); const tot = document.querySelector(`[data-tot="${d.pesi}"]`); if (tot) tot.textContent = P.fmtKg(UI.params.draft.items[d.pesi].cajasCerradas * pesoVigente(A.prod(d.pesi), UI.params.draft.fecha) + ps.reduce((a, b) => a + (+b || 0), 0)) + ' kg'; }
