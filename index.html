@@ -242,7 +242,7 @@ const mMov = r => ({ id: r.id, sucursalId: r.sucursal_id, productoId: r.producto
 const mUsuario = r => ({ id: r.id, nombre: r.nombre, rol: r.rol, sucursales: r.sucursales || [], activo: r.activo });
 
 // ---------- Sesión ----------
-const EMAIL_MAP = { gabriel: 'gabrielnesteruc.gn@gmail.com' };
+const EMAIL_MAP = { gabriel: 'gabrielnesteruc.gn@gmail.com', sareska: 'sareskagael@gmail.com' };
 function emailDe(u) { u = String(u || '').trim().toLowerCase(); if (u.includes('@')) return u; return EMAIL_MAP[u] || (u + '@heladeria.local'); }
 async function login(usuario, pass) {
   const { error } = await sb.auth.signInWithPassword({ email: emailDe(usuario), password: pass });
