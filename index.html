@@ -312,6 +312,7 @@ const prod = id => S.productos.find(p => p.id === id);
 const suc = id => S.sucursales.find(s => s.id === id);
 const usuario = id => S.usuarios.find(u => u.id === id);
 function stock(sucursalId, productoId) { return S.stockMap[sucursalId + '|' + productoId] || 0; }
+async function ultimaVenta(sucursalId) { const rows = await q(sb.from('venta').select('fecha').eq('sucursal_id', sucursalId).order('fecha', { ascending: false }).limit(1), 'última venta'); return rows.length ? String(rows[0].fecha).slice(0, 10) : null; }
 async function stockHasta(sucursalId, fecha) { const rows = await q(sb.rpc('stock_hasta', { p_suc: sucursalId, p_hasta: fecha + ' 23:59' }), 'stock a fecha'); const m = {}; for (const r of rows) m[r.producto_id] = Number(r.stock); return m; }
 async function cargarMovimientos(sucursalId) { const rows = await q(sb.from('movimiento').select('*').eq('sucursal_id', sucursalId).order('id', { ascending: false }).limit(150), 'movimientos'); S.movs[sucursalId] = rows.map(mMov); return S.movs[sucursalId]; }
 
@@ -394,7 +395,7 @@ async function guardarConfig() {
 async function guardarProducto(p) { await q(sb.from('producto').update({ equiv: p.equiv || null, peso_caja: p.pesoCaja || null, activo: p.activo, codigo_ext: p.codigoExt }).eq('id', p.id), 'Guardar producto'); audit('producto', p.id, 'modificar'); }
 async function crearProducto(p) { const row = await q(sb.from('producto').insert({ id: p.id, nombre: p.nombre, nombre_orig: p.nombre, grupo: p.grupo, categoria: p.categoria, unidad: p.unidad, activo: true, codigo_ext: p.codigoExt, ideal: {}, equiv: p.equiv || null, peso_caja: p.pesoCaja || null }).select().single(), 'Crear producto'); S.productos.push(mProducto(row)); audit('producto', p.id, 'crear'); }
 
-window.__app = { get S() { return S; }, UI, sb, login, logout, sesionActiva, cambiarPassword, cargarTodo, refrescarLiviano, prod, suc, usuario, stock, stockHasta, cargarMovimientos, confirmarRemito, crearPedido, cambiarEstadoPedido, registrarVentas, calcularItemInventario, guardarInventario, semaforo, guardarConfig, guardarProducto, crearProducto, urlAdjunto, audit, nowStamp };
+window.__app = { get S() { return S; }, UI, sb, login, logout, sesionActiva, cambiarPassword, cargarTodo, refrescarLiviano, prod, suc, usuario, stock, stockHasta, ultimaVenta, cargarMovimientos, confirmarRemito, crearPedido, cambiarEstadoPedido, registrarVentas, calcularItemInventario, guardarInventario, semaforo, guardarConfig, guardarProducto, crearProducto, urlAdjunto, audit, nowStamp };
 })();
 </script>
 <script>
@@ -415,6 +416,18 @@ const flujosPedido = () => { const S = A.S, u = UI.user, todas = u.rol === 'admi
   for (const x of S.sucursales) { if (x.tipo === 'local' && cam && (todas || u.sucursales.includes(x.id))) out.push({ origen: x, destino: cam }); if (x.tipo === 'externo' && soc && (todas || u.sucursales.includes(x.id))) out.push({ origen: x, destino: soc }); }
   return out; };
 const esExterno = sucId => (A.suc(sucId) || {}).tipo === 'externo';
+// Período de análisis de un local: desde el día siguiente al último inventario cerrado hasta la fecha del conteo
+function periodoInv(sucId, hasta) { const prev = A.S.inventarios.filter(i => i.estado === 'cerrado' && i.sucursalId === sucId && i.fecha < hasta).sort((a, b) => a.fecha < b.fecha ? 1 : -1)[0]; return { desde: prev ? iso(addDays(new Date(prev.fecha + 'T12:00:00'), 1)) : null, hasta }; }
+const diaSig = f => iso(addDays(new Date(f + 'T12:00:00'), 1));
+function faltanVentas(d) { if (d.ultVenta === undefined) return null; const per = periodoInv(d.sucursalId, d.fecha); if (d.ultVenta && d.ultVenta >= d.fecha) return null; const desde = d.ultVenta ? (per.desde && per.desde > d.ultVenta ? per.desde : diaSig(d.ultVenta)) : per.desde; return { desde, hasta: d.fecha }; }
+function cardVentasPeriodo(d) {
+  if (d.ultVenta === undefined) return '';
+  const per = periodoInv(d.sucursalId, d.fecha), falta = faltanVentas(d);
+  const rango = `${per.desde ? 'del ' + fmtDateFull(per.desde) : 'hasta'} ${per.desde ? 'al ' : ''}${fmtDateFull(d.fecha)}`;
+  if (!falta) return `<div class="card"><h2>Ventas del período</h2><div class="small"><span style="color:var(--verde)">●</span> Ventas de Smartfram cargadas hasta ${fmtDateFull(d.ultVenta)}. Período analizado: ${rango}.</div></div>`;
+  return `<div class="card"><h2>Ventas del período</h2><div class="warn">Faltan las ventas de Smartfram ${falta.desde ? 'del <b>' + fmtDateFull(falta.desde) + '</b> ' : ''}al <b>${fmtDateFull(falta.hasta)}</b>. Sin ellas el teórico queda alto y el desvío va a mostrar un faltante que no existe.</div>
+    ${puede('ventas.importar') ? '<button class="btn primary block" id="invVentas" style="margin-top:10px">Cargar ventas de este período</button>' : '<p class="tiny muted" style="margin:8px 0 0">Pedile al encargado que cargue las ventas antes de cerrar el conteo.</p>'}</div>`;
+}
 // Unidades en que se puede pedir cada producto: pack (si el pack trae más de una caja), caja, y unidad suelta para Frizzio y líneas especiales
 const PEDIDO_UNIDAD_CATS = ['FRIZIO', 'SIN AZUCAR', 'YOGURT SIN TACC', 'POSTRE VEGANO'];
 const UNI_ABR = { pack: 'pk', caja: 'cj', unidad: 'u' };
@@ -729,6 +742,7 @@ function vInventarioNuevo() {
     const rows = S.productos.filter(pr => pr.activo && P.enSuc(pr, d.sucursalId) && (esDeposito || pr.grupo !== 'insumo')).map(pr => { const it = { ...(d.items[pr.id] || {}) }; A.calcularItemInventario(pr, it, d.fecha); const teo = (d.teo && d.teo[pr.id]) || 0; const dv = it.real - teo; const pct = teo ? dv / teo * 100 : null; return { pr, real: it.real, teo, dv, pct }; }).filter(r => r.real || r.teo);
     body = `<div class="card"><div class="tablewrap"><table><tr><th>Producto</th><th class="n">Teórico</th><th class="n">Contado</th><th class="n">Desvío</th></tr>${rows.map(r => { const s = A.semaforo(r.pct); const u = unidadBaseLabel(r.pr); const f = esDeposito ? v => fmtDep(r.pr, v) : u === 'kg' ? fmtKg : fmtN; return `<tr><td><span class="dot ${s}"></span>${esc(r.pr.nombre)}</td><td class="n">${f(r.teo)}</td><td class="n">${f(r.real)}</td><td class="n"><span class="pill ${s}">${f(r.dv)}${esDeposito ? '' : ' ' + u}</span></td></tr>`; }).join('')}</table></div>
     <p class="tiny muted" style="margin:8px 0 0">${rows.length} productos con stock o conteo. Al cerrar, el stock de ${esc(A.suc(d.sucursalId).nombre)} queda igual al contado y el desvío se registra como ajuste con tu usuario.</p></div>`;
+    if (!esDeposito) body = cardVentasPeriodo(d) + body;
   }
   return header('Nuevo conteo', 'inventario') + `<main><div class="steps">${pasos.map((s, i) => `<span class="${i <= p ? 'on' : ''}"></span>`).join('')}</div><div class="eyebrow" style="margin-bottom:10px">Paso ${p + 1} de ${pasos.length} · ${pasos[p]}</div>${body}
   <div class="row" style="margin-top:4px">${p > 0 ? `<button class="btn grow" data-paso="${p - 1}">Atrás</button>` : ''}${p < ult ? `<button class="btn primary grow" data-paso="${p + 1}">Siguiente</button>` : (puede('inventario.cerrar') ? `<button class="btn primary grow" id="cerrarInv">Cerrar inventario</button>` : `<button class="btn primary grow" id="guardarInv">Guardar borrador</button>`)}</div></main>`;
@@ -798,21 +812,27 @@ function vProductoDetalle() {
   <div class="card"><h2>Stock teórico ahora</h2>${S.sucursales.filter(x => x.tipo !== 'externo').map(s => `<div class="row between small" style="padding:4px 0"><span>${esc(s.nombre)}</span><span class="num">${s.tipo === 'deposito' ? fmtDep(p, A.stock(s.id, p.id)) : `${(p.grupo === 'helado_granel' ? fmtKg : fmtN)(A.stock(s.id, p.id))} ${unidadBaseLabel(p)}`}</span></div>`).join('')}</div></main>`;
 }
 function vVentas() {
-  const S = A.S, d = UI.params.draft || (UI.params.draft = { sucursalId: miLocal().id, filas: null, nombre: '' });
-  const imps = S.importaciones.slice().reverse().slice(0, 8);
+  const S = A.S, d = UI.params.draft || (UI.params.draft = { sucursalId: (localesVisibles()[0] || miLocal()).id, filas: null, nombre: '' });
+  if (d.ultVenta === undefined && !d._cargando) { d._cargando = true; A.ultimaVenta(d.sucursalId).then(u => { d.ultVenta = u; d._cargando = false; if (UI.screen === 'ventas') render(); }).catch(e => { d._cargando = false; toast(e.message); }); }
+  const imps = S.importaciones.slice(0, 8);
+  const desde = d.desde || (d.ultVenta ? diaSig(d.ultVenta) : null), hasta = d.hasta || iso(HOY);
+  const periodo = d.ultVenta === undefined ? '<p class="small muted" style="margin:0">Buscando la última venta cargada…</p>'
+    : `<div class="small">Exportá de Smartfram las ventas de <b>${esc(A.suc(d.sucursalId).nombre)}</b> ${desde ? 'del <b>' + fmtDateFull(desde) + '</b> ' : ''}al <b>${fmtDateFull(hasta)}</b>.</div><div class="tiny muted" style="margin-top:4px">${d.ultVenta ? 'Última venta cargada: ' + fmtDateFull(d.ultVenta) + '. Lo anterior a esa fecha se descarta solo, para no duplicar.' : 'Todavía no hay ventas cargadas para esta sucursal.'}${d.volverInv ? ' El período termina en la fecha del conteo que estás cerrando.' : ''}</div>`;
   let preview = '';
+  if (d.importado && !d.filas) preview = `<div class="card"><h2>Ventas importadas</h2><div class="small">${d.importado.filasOk} filas cargadas${d.importado.filasError ? ', ' + d.importado.filasError + ' sin mapear (revisalas en Importaciones recientes)' : ''}.</div>${d.volverInv ? '<button class="btn primary block" id="volverInv" style="margin-top:10px">Volver al conteo y recalcular desvío</button>' : ''}</div>`;
   if (d.filas) {
     const codigos = new Set(S.productos.map(p => String(p.codigoExt))); const sinMapeo = [...new Set(d.filas.filter(f => !codigos.has(String(f.codigoExt))).map(f => f.codigoExt + ' · ' + (f.nombre || '')))];
     const tot = d.filas.reduce((a, f) => a + f.importe, 0);
-    preview = `<div class="card"><h2>Vista previa · ${esc(d.nombre)}</h2><div class="small">${d.filas.length} filas · ${fmtPesos(tot)} · del ${fmtDateFull(d.filas.reduce((a, f) => a < f.fecha ? a : f.fecha, '9999'))} al ${fmtDateFull(d.filas.reduce((a, f) => a > f.fecha ? a : f.fecha, '0000'))}</div>
+    preview = `<div class="card"><h2>Vista previa · ${esc(d.nombre)}</h2>${d.descartadas ? `<div class="warn" style="margin-bottom:8px">${d.descartadas} fila${d.descartadas > 1 ? 's' : ''} con fecha hasta el ${fmtDateFull(d.ultVenta)} se descartan porque esas ventas ya están cargadas.</div>` : ''}${d.sinFecha ? `<div class="warn" style="margin-bottom:8px">El archivo no trae columna de fecha: las ventas se registran con fecha ${fmtDateFull(d.hasta || iso(HOY))}. Asegurate de que el archivo sea exactamente del período indicado arriba.</div>` : ''}${d.filas.length ? '' : '<p class="small muted">No quedan filas nuevas para importar.</p>'}<div class="small">${d.filas.length} filas · ${fmtPesos(tot)} · del ${fmtDateFull(d.filas.reduce((a, f) => a < f.fecha ? a : f.fecha, '9999'))} al ${fmtDateFull(d.filas.reduce((a, f) => a > f.fecha ? a : f.fecha, '0000'))}</div>
     ${sinMapeo.length ? `<div class="warn" style="margin-top:8px">${sinMapeo.length} código${sinMapeo.length > 1 ? 's' : ''} sin mapear a producto: ${sinMapeo.map(esc).join(', ')}. Se importa igual y esas filas quedan marcadas con error para mapearlas desde el maestro.</div>` : '<div class="small" style="margin-top:6px;color:var(--verde)">Todos los códigos están mapeados.</div>'}
     <div class="tablewrap" style="margin-top:8px"><table><tr><th>Fecha</th><th>Código</th><th class="n">Cant.</th><th class="n">Importe</th></tr>${d.filas.slice(0, 8).map(f => `<tr><td>${fmtDate(f.fecha)}</td><td class="mono">${esc(f.codigoExt)}</td><td class="n">${f.cantidad}</td><td class="n">${fmtPesos(f.importe)}</td></tr>`).join('')}${d.filas.length > 8 ? `<tr><td colspan="4" class="muted tiny">… y ${d.filas.length - 8} más</td></tr>` : ''}</table></div>
-    <button class="btn primary block" id="impConfirm" style="margin-top:10px">Importar a ${esc(A.suc(d.sucursalId).nombre)}</button></div>`;
+    ${d.filas.length ? `<button class="btn primary block" id="impConfirm" style="margin-top:10px">Importar a ${esc(A.suc(d.sucursalId).nombre)}</button>` : ''}</div>`;
   }
   return header('Importar ventas', 'mas') + `<main>
   <div class="card"><label class="f"><span>Sucursal</span><select id="imp_suc">${localesVisibles().map(s => `<option value="${s.id}" ${d.sucursalId === s.id ? 'selected' : ''}>${esc(s.nombre)}</option>`).join('')}</select></label>
+  <div class="note" style="margin-bottom:10px">${periodo}</div>
   <label class="f"><span>Excel exportado de Smartfram</span><input type="file" id="imp_file" accept=".xlsx,.xls,.csv"></label>
-  <div class="note">Columnas esperadas: <b>fecha</b>, <b>codigo</b>, <b>descripcion</b>, <b>cantidad</b>, <b>importe</b> (se reconocen mayúsculas y acentos). Cuando exista el conector, esta pantalla queda igual y la carga es automática.</div>
+  <details><summary class="small" style="cursor:pointer">Cómo exportar de Smartfram</summary><ol class="small" style="margin:8px 0 0;padding-left:18px"><li>En la PC del local abrí Smartfram y entrá al informe de <b>ventas por artículo</b>.</li><li>Elegí la sucursal y las fechas que indica arriba.</li><li>Exportá a <b>Excel</b> y pasá el archivo al celular (WhatsApp, mail o Drive) o subilo desde la misma PC.</li><li>Elegilo acá: la app reconoce sola las columnas de código, descripción, cantidad, importe y fecha.</li></ol></details>
 </div>
   ${preview}
   <div class="card"><h2>Importaciones recientes</h2><div class="list">${imps.length ? imps.map(i => `<div class="item" style="cursor:default"><div class="grow"><div class="t">${esc(A.suc(i.sucursalId).nombre)} · ${fmtDateFull(i.fecha)}</div><div class="s">${i.origen} · ${i.filasOk} ok · ${i.filasError} con error · ${esc(i.por)}${i.errores && i.errores.length ? '<br>Sin mapear: ' + esc(i.errores.slice(0, 6).join(', ')) : ''}</div></div></div>`).join('') : '<p class="muted small">Sin importaciones.</p>'}</div></div></main>`;
@@ -852,7 +872,7 @@ function render() {
 const nowStamp = () => { const d = new Date(); return iso(d) + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); };
 
 document.addEventListener('click', e => {
-  const t = e.target.closest('[data-adj],[data-go],[data-periodo],[data-suc],[data-qty],[data-estado],[data-paso],[data-ic],[data-addpes],[data-delpes],[data-stocksuc],#refrescar,#ocrBtn,#crearPedido,#confRemito,#cerrarInv,#guardarInv,#logout,#cambiarPass,#impConfirm,#c_save,#np_add,#eq_save,#nuevoProd');
+  const t = e.target.closest('[data-adj],[data-go],[data-periodo],[data-suc],[data-qty],[data-estado],[data-paso],[data-ic],[data-addpes],[data-delpes],[data-stocksuc],#refrescar,#ocrBtn,#invVentas,#volverInv,#crearPedido,#confRemito,#cerrarInv,#guardarInv,#logout,#cambiarPass,#impConfirm,#c_save,#np_add,#eq_save,#nuevoProd');
   if (!t) return;
   const S = A.S, d = t.dataset;
   if (d.adj) { e.preventDefault(); A.urlAdjunto(d.adj).then(u => window.open(u, '_blank')).catch(er => toast(er.message)); return; }
@@ -883,7 +903,7 @@ document.addEventListener('click', e => {
   }
   if (d.paso !== undefined) { const dr = UI.params.draft; if (dr.paso === 0) { dr.sucursalId = $('#inv_suc').value; dr.fecha = $('#inv_fecha').value || iso(HOY); } dr.paso = +d.paso; UI.params.q = '';
     const esDep = A.suc(dr.sucursalId).tipo === 'deposito'; const ult = esDep ? 4 : 3;
-    if (dr.paso === ult) { ocupado(async () => { dr.teo = await A.stockHasta(dr.sucursalId, dr.fecha); render(); }, 'Calculando stock teórico…'); } else render(); return; }
+    if (dr.paso === ult) { ocupado(async () => { dr.teo = await A.stockHasta(dr.sucursalId, dr.fecha); dr.ultVenta = esDep ? null : await A.ultimaVenta(dr.sucursalId); render(); }, 'Calculando stock teórico…'); } else render(); return; }
   if (d.ic) { const it = UI.params.draft.items[d.ic]; it.cajasCerradas = Math.max(0, it.cajasCerradas + (+d.d)); render(); return; }
   if (d.addpes) { const ps = UI.params.draft.items[d.addpes].pesadas; while (ps.length < 2) ps.push(''); ps.push(''); render(); return; }
   if (d.delpes) { UI.params.draft.items[d.delpes].pesadas.splice(+d.i, 1); render(); return; }
@@ -891,14 +911,19 @@ document.addEventListener('click', e => {
     const dr = UI.params.draft;
     const inv = { sucursalId: dr.sucursalId, fecha: dr.fecha, items: S.productos.filter(p => p.activo && P.enSuc(p, dr.sucursalId) && (A.suc(dr.sucursalId).tipo === 'deposito' || p.grupo !== 'insumo')).map(p => ({ productoId: p.id, ...(dr.items[p.id] || {}) })).filter(it => { const c = { ...it }; A.calcularItemInventario(A.prod(it.productoId), c, dr.fecha); return c.real > 0 || (dr.teo && dr.teo[it.productoId]); }) };
     const cerrar = t.id === 'cerrarInv';
+    const falta = cerrar && A.suc(dr.sucursalId).tipo === 'local' ? faltanVentas(dr) : null;
+    if (falta && !confirm(`Faltan cargar las ventas de Smartfram ${falta.desde ? 'del ' + fmtDateFull(falta.desde) + ' ' : ''}al ${fmtDateFull(falta.hasta)}.\n\nSi cerrás ahora, el desvío va a salir mal y esas ventas ya no se podrán descontar de este período. ¿Cerrar igual?`)) return;
     if (cerrar && !confirm('¿Cerrar el inventario? El stock de ' + A.suc(dr.sucursalId).nombre + ' quedará igual al contado.')) return;
     ocupado(async () => { const m = await A.guardarInventario(inv, cerrar); toast(cerrar ? 'Inventario cerrado: stock ajustado' : 'Borrador guardado'); go('inventario-detalle', { id: m.id }); }, 'Guardando inventario…'); return;
   }
   if (t.id === 'logout') { ocupado(async () => { await A.logout(); go('login'); }); return; }
   if (t.id === 'cambiarPass') { const n = prompt('Nueva contraseña (mínimo 8 caracteres):'); if (!n) return; if (n.length < 8) return toast('Mínimo 8 caracteres'); ocupado(async () => { await A.cambiarPassword(n); toast('Contraseña actualizada'); }, 'Guardando…'); return; }
+  if (t.id === 'invVentas') { const dr = UI.params.draft, f = faltanVentas(dr); UI._invVuelta = dr; go('ventas', { draft: { sucursalId: dr.sucursalId, desde: f && f.desde, hasta: dr.fecha, filas: null, nombre: '', volverInv: true, ultVenta: dr.ultVenta } }); return; }
+  if (t.id === 'volverInv') { const dr = UI._invVuelta; if (!dr) return go('inventario'); UI._invVuelta = null; go('inventario-nuevo', { draft: dr }); ocupado(async () => { dr.teo = await A.stockHasta(dr.sucursalId, dr.fecha); dr.ultVenta = await A.ultimaVenta(dr.sucursalId); render(); }, 'Recalculando con las ventas…'); return; }
   if (t.id === 'impConfirm') {
     const dr = UI.params.draft;
-    ocupado(async () => { const imp = await A.registrarVentas(dr.sucursalId, dr.filas, 'smartfram_excel'); dr.filas = null; toast(`Importadas ${imp.filasOk} filas${imp.filasError ? ', ' + imp.filasError + ' sin mapear' : ''}`); render(); }, 'Importando ventas…'); return;
+    if (!dr.filas || !dr.filas.length) return toast('No hay filas nuevas para importar');
+    ocupado(async () => { const imp = await A.registrarVentas(dr.sucursalId, dr.filas, 'smartfram_excel'); dr.filas = null; dr.importado = imp; dr.ultVenta = await A.ultimaVenta(dr.sucursalId); toast(`Importadas ${imp.filasOk} filas${imp.filasError ? ', ' + imp.filasError + ' sin mapear' : ''}`); render(); }, 'Importando ventas…'); return;
   }
   if (t.id === 'c_save') { S.config.umbralAmbar = Math.max(0, +$('#c_ambar').value || 0); S.config.umbralRojo = Math.max(S.config.umbralAmbar, +$('#c_rojo').value || 0); S.config.precioKgRef = +$('#c_precio').value || 0; ocupado(async () => { await A.guardarConfig(); commit('Configuración guardada'); }, 'Guardando…'); return; }
   if (t.id === 'np_add') { const p = A.prod(UI.params.id); const kg = parseFloat($('#np_kg').value); if (!(kg > 0)) return toast('Ingresá un peso válido'); p.pesoCaja = [...(p.pesoCaja || []), { kg, desde: $('#np_desde').value || iso(HOY), por: UI.user.nombre }]; ocupado(async () => { await A.guardarProducto(p); commit('Nuevo peso promedio registrado'); }, 'Guardando…'); return; }
@@ -920,7 +945,7 @@ document.addEventListener('input', e => {
   if (t.id === 'r_fecha') { UI.params.draft.fecha = t.value; refreshRemitoBtn(); }
   if (t.id === 'r_prov') UI.params.draft.proveedorId = t.value;
   if (t.id === 'r_suc') { UI.params.draft.sucursalId = t.value; UI.params.draft.items = {}; render(); }
-  if (t.id === 'imp_suc') UI.params.draft.sucursalId = t.value;
+  if (t.id === 'imp_suc') { const dr = UI.params.draft; dr.sucursalId = t.value; dr.ultVenta = undefined; dr.filas = null; dr.desde = null; dr.hasta = null; render(); }
   if (t.id === 'pf_flujo') { UI.params.draft.flujo = +t.value; UI.params.draft.items = {}; render(); }
 });
 function refreshRemitoBtn() { const d = UI.params.draft; const total = Object.values(d.items).reduce((a, b) => a + b, 0); const ok = d.numero && d.fecha && d.archivo && total > 0; const b = $('#confRemito'); if (b) { b.disabled = !ok; b.textContent = `Confirmar ingreso (${total} cajas)`; } }
@@ -1032,18 +1057,34 @@ async function leerRemitoFoto() {
   render(); window.scrollTo(0, 0);
   toast(ok.length ? `Reconocí ${ok.length} productos` : 'No pude leer productos en la foto; probá con más luz y la hoja derecha');
 }
+// ---------- Ventas de Smartfram: lectura flexible del Excel ----------
+const numAR = v => { if (typeof v === 'number') return v; let t = String(v || '').replace(/[^\d,.\-]/g, ''); if (!t) return 0; if (t.includes(',') && t.includes('.')) t = t.lastIndexOf(',') > t.lastIndexOf('.') ? t.replace(/\./g, '').replace(',', '.') : t.replace(/,/g, ''); else if (t.includes(',')) t = t.replace(',', '.'); return parseFloat(t) || 0; };
+const fechaDe = v => { if (v instanceof Date) return iso(v); const t = String(v || '').trim(); let m = t.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})/); if (m) return `${m[3].length === 2 ? '20' + m[3] : m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`; m = t.match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? m[0] : null; };
 function leerExcel(file) {
   const rd = new FileReader();
-  rd.onload = ev => {
+  rd.onload = async ev => {
     try {
+      const dr = UI.params.draft; dr.sucursalId = $('#imp_suc').value;
       const wb = XLSX.read(new Uint8Array(ev.target.result), { type: 'array', cellDates: true });
       const ws = wb.Sheets[wb.SheetNames[0]];
-      const rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
-      const norm = s => String(s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').trim();
-      const filas = rows.map(r => { const o = {}; for (const k in r) o[norm(k)] = r[k]; const fecha = o.fecha instanceof Date ? iso(o.fecha) : String(o.fecha || '').slice(0, 10).split('/').length === 3 ? String(o.fecha).split('/').reverse().map((x, i) => i === 0 && x.length === 2 ? '20' + x : x).join('-') : String(o.fecha || iso(HOY)).slice(0, 10);
-        return { fecha, codigoExt: String(o.codigo || o.sku || o.articulo || '').trim(), nombre: String(o.descripcion || o.producto || o.nombre || ''), cantidad: parseFloat(o.cantidad || o.cant || 0) || 0, importe: parseFloat(o.importe || o.total || o.monto || 0) || 0 }; }).filter(f => f.codigoExt);
-      if (!filas.length) return toast('No se encontraron filas con columna "codigo"');
-      UI.params.draft.filas = filas; UI.params.draft.nombre = file.name; UI.params.draft.sucursalId = $('#imp_suc').value; render();
+      const matriz = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+      const norm = s => String(s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+      // la fila de títulos puede no ser la primera (Smartfram suele poner encabezados del informe arriba)
+      const hi = matriz.slice(0, 25).findIndex(r => r.some(c => /^cod|articulo|sku/.test(norm(c))) && r.some(c => /cant|unid/.test(norm(c))));
+      if (hi < 0) return toast('No encontré las columnas de código y cantidad en el archivo');
+      const cab = matriz[hi].map(norm);
+      const col = (...re) => cab.findIndex(c => re.some(r => r.test(c)));
+      const cCod = col(/^cod/, /articulo/, /sku/), cNom = col(/desc/, /producto/, /nombre/, /detalle/), cCant = col(/^cant/, /unidades/, /^unid/), cImp = col(/importe/, /^total/, /monto/, /venta/), cFec = col(/fecha/, /^dia$/);
+      const sinFecha = cFec < 0;
+      if (dr.ultVenta === undefined) dr.ultVenta = await A.ultimaVenta(dr.sucursalId);
+      const fechaDefecto = dr.hasta || iso(HOY);
+      const filas = matriz.slice(hi + 1).map(r => ({ fecha: (cFec >= 0 && fechaDe(r[cFec])) || fechaDefecto, codigoExt: String(r[cCod] ?? '').trim(), nombre: cNom >= 0 ? String(r[cNom] ?? '') : '', cantidad: numAR(r[cCant]), importe: cImp >= 0 ? numAR(r[cImp]) : 0 }))
+        .filter(f => f.codigoExt && /\d/.test(f.codigoExt) && f.cantidad && !/total/i.test(f.codigoExt + ' ' + f.nombre));
+      if (!filas.length) return toast('El archivo no tiene filas de ventas con código y cantidad');
+      // nunca se importa dos veces el mismo día: lo que ya está cargado (hasta la última venta registrada) se descarta
+      const ya = dr.ultVenta ? filas.filter(f => f.fecha <= dr.ultVenta) : [];
+      dr.filas = filas.filter(f => !ya.includes(f)); dr.descartadas = ya.length; dr.sinFecha = sinFecha; dr.nombre = file.name;
+      render();
     } catch (err) { toast('No se pudo leer el archivo: ' + err.message); }
   };
   rd.readAsArrayBuffer(file);
