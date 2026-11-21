@@ -383,9 +383,12 @@ async function guardarInventario(inv, cerrar) {
     const p = prod(it.productoId); calcularItemInventario(p, it, inv.fecha);
     if (cerrar) { it.teorico = teo[p.id] || 0; it.desvio = it.real - it.teorico; it.desvioPct = it.teorico ? it.desvio / it.teorico * 100 : null; if (Math.abs(it.desvio) > 0.0005) movs.push({ sucursalId: inv.sucursalId, productoId: p.id, tipo: 'ajuste_inventario', cantidad: Math.round(it.desvio * 1000) / 1000, fecha: inv.fecha + ' 23:59', ref: 'Inventario ' + inv.fecha }); }
   }
-  const row = await q(sb.from('inventario').insert({ sucursal_id: inv.sucursalId, fecha: inv.fecha, estado: cerrar ? 'cerrado' : 'borrador', por: UI.user.nombre, cerrado_por: cerrar ? UI.user.nombre : null, cerrado_en: cerrar ? nowStamp() : null, items: inv.items, creado_por: UI.user.id }).select().single(), 'Guardar inventario');
+  const datos = { fecha: inv.fecha, estado: cerrar ? 'cerrado' : 'borrador', cerrado_por: cerrar ? UI.user.nombre : null, cerrado_en: cerrar ? nowStamp() : null, items: inv.items };
+  // un conteo guardado como pendiente se cierra después sobre la misma fila (no se duplica)
+  const row = inv.borradorId ? await q(sb.from('inventario').update(datos).eq('id', inv.borradorId).select().single(), 'Cerrar inventario')
+    : await q(sb.from('inventario').insert({ ...datos, sucursal_id: inv.sucursalId, por: UI.user.nombre, creado_por: UI.user.id }).select().single(), 'Guardar inventario');
   if (cerrar) await insertarMovs(movs);
-  const m = mInv(row); S.inventarios.unshift(m); audit('inventario', inv.fecha, cerrar ? 'cerrar' : 'borrador'); return m;
+  const m = mInv(row); const k = S.inventarios.findIndex(x => x.id === m.id); if (k >= 0) S.inventarios[k] = m; else S.inventarios.unshift(m); audit('inventario', inv.fecha, cerrar ? 'cerrar' : 'borrador'); return m;
 }
 function semaforo(pct) { if (pct === null || pct === undefined || isNaN(pct)) return 'gris'; const a = Math.abs(pct); if (a <= S.config.umbralAmbar + 1e-9) return 'verde'; if (a <= S.config.umbralRojo + 1e-9) return 'ambar'; return 'rojo'; }
 async function guardarConfig() {
@@ -432,7 +435,7 @@ function cardVentasPeriodo(d) {
   const rango = `${per.desde ? 'del ' + fmtDateFull(per.desde) : 'hasta'} ${per.desde ? 'al ' : ''}${fmtDateFull(d.fecha)}`;
   if (!falta) return `<div class="card"><h2>Ventas del período</h2><div class="small"><span style="color:var(--verde)">●</span> Ventas de Smartfram cargadas hasta ${fmtDateFull(d.ultVenta)}. Período analizado: ${rango}.</div></div>`;
   return `<div class="card"><h2>Ventas del período</h2><div class="warn">Faltan las ventas de Smartfram ${falta.desde ? 'del <b>' + fmtDateFull(falta.desde) + '</b> ' : ''}al <b>${fmtDateFull(falta.hasta)}</b>. Sin ellas el teórico queda alto y el desvío va a mostrar un faltante que no existe.</div>
-    ${puede('ventas.importar') ? '<button class="btn primary block" id="invVentas" style="margin-top:10px">Cargar ventas de este período</button>' : '<p class="tiny muted" style="margin:8px 0 0">Pedile al encargado que cargue las ventas antes de cerrar el conteo.</p>'}</div>`;
+    ${UI.user.rol === 'administrador' ? '<button class="btn primary block" id="invVentas" style="margin-top:10px">Cargar ventas de este período</button>' : '<p class="small" style="margin:8px 0 0">Guardá el conteo con el botón de abajo: el administrador carga las ventas de Smartfram y lo cierra.</p>'}</div>`;
 }
 // Unidades en que se puede pedir cada producto: pack (si el pack trae más de una caja), caja, y unidad suelta para Frizzio y líneas especiales
 const PEDIDO_UNIDAD_CATS = ['FRIZIO', 'SIN AZUCAR', 'YOGURT SIN TACC', 'POSTRE VEGANO'];
@@ -718,10 +721,12 @@ function vRemitoNuevo() {
 function vInventario() {
   const S = A.S, locs = misSucursales();
   const list = S.inventarios.filter(i => locs.some(l => l.id === i.sucursalId)).sort((a, b) => a.fecha < b.fecha ? 1 : -1).slice(0, 16);
+  const pend = list.filter(i => i.estado !== 'cerrado');
   return header('Inventario semanal') + `<main>
+  ${pend.length && UI.user.rol === 'administrador' ? `<div class="card"><div class="warn"><b>${pend.length} conteo${pend.length > 1 ? 's' : ''} pendiente${pend.length > 1 ? 's' : ''} de cierre</b>: ${pend.map(i => esc(A.suc(i.sucursalId).nombre) + ' ' + fmtDate(i.fecha)).join(', ')}. Entrá a cada uno, cargá las ventas de Smartfram y cerralo.</div></div>` : ''}
   ${puede('inventario.cargar') ? `<button class="btn primary block" data-go="inventario-nuevo" style="margin-bottom:12px">+ Nuevo conteo</button>` : ''}
   <div class="card"><h2>Conteos</h2><div class="list">${list.length ? list.map(i => { let d = 0, t = 0; for (const it of i.items) if (A.prod(it.productoId).grupo === 'helado_granel') { d += it.desvio || 0; t += it.teorico || 0; } const pct = t ? d / t * 100 : null; const s = i.estado === 'cerrado' ? A.semaforo(pct) : 'gris';
-    return `<div class="item" data-go="inventario-detalle" data-id="${i.id}"><div class="grow"><div class="t">${esc(A.suc(i.sucursalId).nombre)} · ${fmtDateFull(i.fecha)}</div><div class="s">${i.estado === 'cerrado' ? `Desvío helado ${fmtKg(d)} kg · cerró ${esc(i.cerradoPor)}` : 'Borrador · ' + esc(i.por)}</div></div><span class="pill ${s}">${i.estado === 'cerrado' ? fmtPct(pct) : 'borrador'}</span></div>`; }).join('') : '<p class="muted small">Sin conteos todavía.</p>'}</div></div></main>`;
+    return `<div class="item" data-go="inventario-detalle" data-id="${i.id}"><div class="grow"><div class="t">${esc(A.suc(i.sucursalId).nombre)} · ${fmtDateFull(i.fecha)}</div><div class="s">${i.estado === 'cerrado' ? `Desvío helado ${fmtKg(d)} kg · cerró ${esc(i.cerradoPor)}` : 'Pendiente de ventas y cierre · contó ' + esc(i.por)}</div></div><span class="pill ${i.estado === 'cerrado' ? s : 'ambar'}">${i.estado === 'cerrado' ? fmtPct(pct) : 'pendiente'}</span></div>`; }).join('') : '<p class="muted small">Sin conteos todavía.</p>'}</div></div></main>`;
 }
 function vInventarioNuevo() {
   const S = A.S;
@@ -752,13 +757,13 @@ function vInventarioNuevo() {
     if (!esDeposito) body = cardVentasPeriodo(d) + body;
   }
   return header('Nuevo conteo', 'inventario') + `<main><div class="steps">${pasos.map((s, i) => `<span class="${i <= p ? 'on' : ''}"></span>`).join('')}</div><div class="eyebrow" style="margin-bottom:10px">Paso ${p + 1} de ${pasos.length} · ${pasos[p]}</div>${body}
-  <div class="row" style="margin-top:4px">${p > 0 ? `<button class="btn grow" data-paso="${p - 1}">Atrás</button>` : ''}${p < ult ? `<button class="btn primary grow" data-paso="${p + 1}">Siguiente</button>` : (puede('inventario.cerrar') ? `<button class="btn primary grow" id="cerrarInv">Cerrar inventario</button>` : `<button class="btn primary grow" id="guardarInv">Guardar borrador</button>`)}</div></main>`;
+  <div class="row" style="margin-top:4px">${p > 0 ? `<button class="btn grow" data-paso="${p - 1}">Atrás</button>` : ''}${p < ult ? `<button class="btn primary grow" data-paso="${p + 1}">Siguiente</button>` : (puede('inventario.cerrar') && !(!esDeposito && faltanVentas(d) && UI.user.rol !== 'administrador') ? `<button class="btn primary grow" id="cerrarInv">Cerrar inventario</button>` : `<button class="btn primary grow" id="guardarInv">${!esDeposito && faltanVentas(d) ? 'Enviar conteo · queda pendiente de ventas' : 'Guardar borrador'}</button>`)}</div></main>`;
 }
 function vInventarioDetalle() {
   const S = A.S, inv = S.inventarios.find(i => i.id === UI.params.id); if (!inv) return go('inventario');
   const rows = inv.items.map(it => ({ it, pr: A.prod(it.productoId) })).filter(r => r.it.real || r.it.teorico);
   return header('Conteo ' + fmtDateFull(inv.fecha), 'inventario') + `<main>
-  <div class="card"><div class="row between"><div><div style="font-weight:600">${esc(A.suc(inv.sucursalId).nombre)}</div><div class="small muted">${inv.estado === 'cerrado' ? `Cerrado por ${esc(inv.cerradoPor)}` : 'Borrador de ' + esc(inv.por)}</div></div><span class="pill ${inv.estado === 'cerrado' ? 'verde' : 'gris'}">${inv.estado}</span></div></div>
+  <div class="card"><div class="row between"><div><div style="font-weight:600">${esc(A.suc(inv.sucursalId).nombre)}</div><div class="small muted">${inv.estado === 'cerrado' ? `Cerrado por ${esc(inv.cerradoPor)}` : 'Contó ' + esc(inv.por) + ' · pendiente de cierre'}</div></div><span class="pill ${inv.estado === 'cerrado' ? 'verde' : 'ambar'}">${inv.estado === 'cerrado' ? 'cerrado' : 'pendiente'}</span></div>${inv.estado !== 'cerrado' && puede('inventario.cerrar') ? `<button class="btn primary block" id="retomarInv" style="margin-top:10px">${UI.user.rol === 'administrador' && A.suc(inv.sucursalId).tipo === 'local' ? 'Cargar ventas y cerrar este conteo' : 'Revisar y cerrar este conteo'}</button>` : ''}</div>
   <div class="card"><div class="tablewrap"><table><tr><th>Producto</th><th class="n">Teórico</th><th class="n">Real</th><th class="n">Desvío</th><th class="n">%</th></tr>${rows.map(({ it, pr }) => { const s = inv.estado === 'cerrado' ? A.semaforo(it.desvioPct) : 'gris'; const u = unidadBaseLabel(pr); const f = esDeposito(inv.sucursalId) ? v => fmtDep(pr, v) : u === 'kg' ? fmtKg : fmtN; return `<tr><td><span class="dot ${s}"></span>${esc(pr.nombre)}${pr.grupo === 'helado_granel' ? `<div class="tiny muted">${it.cajasCerradas} cj × ${it.pesoAplicado} kg${it.pesadas && it.pesadas.filter(w => w !== '' && +w > 0).length ? ' + ' + it.pesadas.filter(w => w !== '' && +w > 0).join(' + ') + ' kg' : ''}</div>` : `<div class="tiny muted">${it.cajas || 0} cj · ${it.packs || 0} pk · ${it.unidades || 0} u</div>`}</td><td class="n">${it.teorico === undefined ? '—' : f(it.teorico)}</td><td class="n">${f(it.real || 0)}</td><td class="n">${it.desvio === undefined ? '—' : f(it.desvio)}</td><td class="n">${it.desvioPct === undefined ? '—' : `<span class="pill ${s}">${it.desvioPct === null ? '—' : fmtPct(it.desvioPct)}</span>`}</td></tr>`; }).join('')}</table></div></div></main>`;
 }
 
@@ -879,7 +884,7 @@ function render() {
 const nowStamp = () => { const d = new Date(); return iso(d) + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); };
 
 document.addEventListener('click', e => {
-  const t = e.target.closest('[data-adj],[data-go],[data-periodo],[data-suc],[data-qty],[data-estado],[data-paso],[data-ic],[data-addpes],[data-delpes],[data-stocksuc],#refrescar,#ocrBtn,#invVentas,#volverInv,#crearPedido,#confRemito,#cerrarInv,#guardarInv,#logout,#cambiarPass,#impConfirm,#c_save,#np_add,#eq_save,#nuevoProd');
+  const t = e.target.closest('[data-adj],[data-go],[data-periodo],[data-suc],[data-qty],[data-estado],[data-paso],[data-ic],[data-addpes],[data-delpes],[data-stocksuc],#refrescar,#ocrBtn,#invVentas,#volverInv,#retomarInv,#crearPedido,#confRemito,#cerrarInv,#guardarInv,#logout,#cambiarPass,#impConfirm,#c_save,#np_add,#eq_save,#nuevoProd');
   if (!t) return;
   const S = A.S, d = t.dataset;
   if (d.adj) { e.preventDefault(); A.urlAdjunto(d.adj).then(u => window.open(u, '_blank')).catch(er => toast(er.message)); return; }
@@ -927,15 +932,19 @@ document.addEventListener('click', e => {
   if (d.delpes) { UI.params.draft.items[d.delpes].pesadas.splice(+d.i, 1); render(); return; }
   if (t.id === 'cerrarInv' || t.id === 'guardarInv') {
     const dr = UI.params.draft;
-    const inv = { sucursalId: dr.sucursalId, fecha: dr.fecha, items: S.productos.filter(p => p.activo && P.enSuc(p, dr.sucursalId) && (A.suc(dr.sucursalId).tipo === 'deposito' || p.grupo !== 'insumo')).map(p => ({ productoId: p.id, ...(dr.items[p.id] || {}) })).filter(it => { const c = { ...it }; A.calcularItemInventario(A.prod(it.productoId), c, dr.fecha); return c.real > 0 || (dr.teo && dr.teo[it.productoId]); }) };
+    const inv = { borradorId: dr.borradorId, sucursalId: dr.sucursalId, fecha: dr.fecha, items: S.productos.filter(p => p.activo && P.enSuc(p, dr.sucursalId) && (A.suc(dr.sucursalId).tipo === 'deposito' || p.grupo !== 'insumo')).map(p => ({ productoId: p.id, ...(dr.items[p.id] || {}) })).filter(it => { const c = { ...it }; A.calcularItemInventario(A.prod(it.productoId), c, dr.fecha); return c.real > 0 || (dr.teo && dr.teo[it.productoId]); }) };
     const cerrar = t.id === 'cerrarInv';
     const falta = cerrar && A.suc(dr.sucursalId).tipo === 'local' ? faltanVentas(dr) : null;
     if (falta && !confirm(`Faltan cargar las ventas de Smartfram ${falta.desde ? 'del ' + fmtDateFull(falta.desde) + ' ' : ''}al ${fmtDateFull(falta.hasta)}.\n\nSi cerrás ahora, el desvío va a salir mal y esas ventas ya no se podrán descontar de este período. ¿Cerrar igual?`)) return;
     if (cerrar && !confirm('¿Cerrar el inventario? El stock de ' + A.suc(dr.sucursalId).nombre + ' quedará igual al contado.')) return;
-    ocupado(async () => { const m = await A.guardarInventario(inv, cerrar); toast(cerrar ? 'Inventario cerrado: stock ajustado' : 'Borrador guardado'); go('inventario-detalle', { id: m.id }); }, 'Guardando inventario…'); return;
+    ocupado(async () => { const m = await A.guardarInventario(inv, cerrar); toast(cerrar ? 'Inventario cerrado: stock ajustado' : (A.suc(dr.sucursalId).tipo === 'local' && faltanVentas(dr) ? 'Conteo enviado: queda pendiente de las ventas y el cierre' : 'Borrador guardado')); go('inventario-detalle', { id: m.id }); }, 'Guardando inventario…'); return;
   }
   if (t.id === 'logout') { ocupado(async () => { await A.logout(); go('login'); }); return; }
   if (t.id === 'cambiarPass') { const n = prompt('Nueva contraseña (mínimo 8 caracteres):'); if (!n) return; if (n.length < 8) return toast('Mínimo 8 caracteres'); ocupado(async () => { await A.cambiarPassword(n); toast('Contraseña actualizada'); }, 'Guardando…'); return; }
+  if (t.id === 'retomarInv') { const inv = S.inventarios.find(i => i.id === UI.params.id); if (!inv) return; const esDep = A.suc(inv.sucursalId).tipo === 'deposito'; const items = {};
+    for (const it of inv.items) { const { productoId, teorico, desvio, desvioPct, real, pesoAplicado, ...rest } = it; items[productoId] = { cajasCerradas: 0, pesadas: [], cajas: 0, packs: 0, unidades: 0, ...rest }; }
+    const dr = { sucursalId: inv.sucursalId, fecha: inv.fecha, items, paso: esDep ? 4 : 3, borradorId: inv.id }; go('inventario-nuevo', { draft: dr });
+    ocupado(async () => { dr.teo = await A.stockHasta(dr.sucursalId, dr.fecha); dr.ultVenta = esDep ? null : await A.ultimaVenta(dr.sucursalId); render(); }, 'Calculando stock teórico…'); return; }
   if (t.id === 'invVentas') { const dr = UI.params.draft, f = faltanVentas(dr); UI._invVuelta = dr; go('ventas', { draft: { sucursalId: dr.sucursalId, desde: f && f.desde, hasta: dr.fecha, filas: null, nombre: '', volverInv: true, ultVenta: dr.ultVenta } }); return; }
   if (t.id === 'volverInv') { const dr = UI._invVuelta; if (!dr) return go('inventario'); UI._invVuelta = null; go('inventario-nuevo', { draft: dr }); ocupado(async () => { dr.teo = await A.stockHasta(dr.sucursalId, dr.fecha); dr.ultVenta = await A.ultimaVenta(dr.sucursalId); render(); }, 'Recalculando con las ventas…'); return; }
   if (t.id === 'impConfirm') {
