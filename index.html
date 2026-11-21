@@ -420,6 +420,8 @@ const esExterno = sucId => (A.suc(sucId) || {}).tipo === 'externo';
 const telWA = sucId => String((A.suc(sucId) || {}).tel || '').replace(/\D/g, '');
 function textoPedidoWA(p) { const U = { pack: 'pk', caja: 'cj', unidad: 'u' }; return `*Pedido #${p.numero}* de ${A.suc(p.origen).nombre} para ${A.suc(p.destino).nombre}\n` + p.items.map(i => `• ${i.preparada ?? i.pedida} ${U[i.unidad] || 'cj'} ${A.prod(i.productoId).nombre}`).join('\n') + (p.notas ? `\nNotas: ${p.notas}` : '') + `\nCargado por ${(p.hist && p.hist[0] && p.hist[0].por) || UI.user.nombre}. Prepararlo desde la app: ${location.origin + location.pathname}`; }
 const urlWA = (tel, txt) => `https://wa.me/${tel}?text=${encodeURIComponent(txt)}`;
+// Aviso de "pedido listo" al responsable del local que pidió (el teléfono se guarda en la sucursal de origen)
+function textoListoWA(p) { const U = { pack: 'pk', caja: 'cj', unidad: 'u' }, ext = esExterno(p.origen); return `*Pedido #${p.numero} ${ext ? 'listo para retirar' : 'preparado'}* en ${A.suc(p.destino).nombre} para ${A.suc(p.origen).nombre}\n` + p.items.map(i => `• ${i.preparada ?? i.pedida} ${U[i.unidad] || 'cj'} ${A.prod(i.productoId).nombre}${i.preparada !== undefined && i.preparada !== i.pedida ? ` (pedido: ${i.pedida})` : ''}`).join('\n') + `\nPreparó ${UI.user.nombre}. ${ext ? 'Avisá a los emprendedores que pueden pasar a retirarlo.' : 'Cuando llegue, confirmá la recepción en la app:'} ${location.origin + location.pathname}`; }
 // Período de análisis de un local: desde el día siguiente al último inventario cerrado hasta la fecha del conteo
 function periodoInv(sucId, hasta) { const prev = A.S.inventarios.filter(i => i.estado === 'cerrado' && i.sucursalId === sucId && i.fecha < hasta).sort((a, b) => a.fecha < b.fecha ? 1 : -1)[0]; return { desde: prev ? iso(addDays(new Date(prev.fecha + 'T12:00:00'), 1)) : null, hasta }; }
 const diaSig = f => iso(addDays(new Date(f + 'T12:00:00'), 1));
@@ -626,7 +628,7 @@ function vPedidos() {
   const mios = S.pedidos.filter(p => u.rol === 'administrador' || u.sucursales.includes(p.origen) || u.sucursales.includes(p.destino)).sort((a, b) => b.numero - a.numero);
   const abiertos = mios.filter(p => p.estado !== 'recibido' && p.estado !== 'cancelado');
   const cerrados = mios.filter(p => p.estado === 'recibido' || p.estado === 'cancelado').slice(0, 12);
-  const item = p => { let [t, c] = ESTADO[p.estado]; if (p.estado === 'recibido' && esExterno(p.origen)) t = 'Entregado'; return `<div class="item" data-go="pedido-detalle" data-id="${p.id}"><div class="grow"><div class="t">Pedido #${p.numero} · ${A.suc(p.origen).nombre}</div><div class="s">${p.items.length} productos · ${p.hist[p.hist.length - 1].en} · ${esc(p.hist[p.hist.length - 1].por)}</div></div><span class="pill ${c}">${t}</span></div>`; };
+  const item = p => { let [t, c] = ESTADO[p.estado]; if (p.estado === 'recibido' && esExterno(p.origen)) t = 'Entregado'; if (p.estado === 'enviado') t = esExterno(p.origen) ? 'Listo para retirar' : 'Preparado'; return `<div class="item" data-go="pedido-detalle" data-id="${p.id}"><div class="grow"><div class="t">Pedido #${p.numero} · ${A.suc(p.origen).nombre}</div><div class="s">${p.items.length} productos · ${p.hist[p.hist.length - 1].en} · ${esc(p.hist[p.hist.length - 1].por)}</div></div><span class="pill ${c}">${t}</span></div>`; };
   return header('Pedidos') + `<main>
   ${puede('pedido.crear') && flujosPedido().length ? `<button class="btn primary block" data-go="pedido-nuevo" style="margin-bottom:12px">+ Nuevo pedido</button>` : ''}
   <div class="card"><h2>En curso</h2><div class="list">${abiertos.length ? abiertos.map(item).join('') : '<p class="muted small">No hay pedidos en curso.</p>'}</div></div>
@@ -653,7 +655,7 @@ function vPedidoNuevo() {
 }
 function vPedidoDetalle() {
   const S = A.S, p = S.pedidos.find(x => x.id === UI.params.id); if (!p) return go('pedidos');
-  const u = UI.user, externo = esExterno(p.origen); let [t, c] = ESTADO[p.estado]; if (externo && p.estado === 'recibido') t = 'Entregado';
+  const u = UI.user, externo = esExterno(p.origen); let [t, c] = ESTADO[p.estado]; if (externo && p.estado === 'recibido') t = 'Entregado'; if (p.estado === 'enviado') t = externo ? 'Listo para retirar' : 'Preparado';
   const esDeposito = puede('pedido.preparar') && (u.rol === 'administrador' || u.sucursales.includes(p.destino));
   const esLocal = puede('pedido.recibir') && (u.rol === 'administrador' || u.sucursales.includes(p.origen));
   const editable = (p.estado === 'solicitado' || p.estado === 'en_preparacion') && esDeposito ? 'preparada' : p.estado === 'enviado' && esLocal ? 'recibida' : null;
@@ -664,9 +666,10 @@ function vPedidoDetalle() {
   const wa = (num) => urlWA(String(num || '').replace(/\D/g, ''), textoPedidoWA(p));
   let acciones = '';
   if (p.estado === 'solicitado' && esDeposito) acciones = `<button class="btn primary block" data-estado="en_preparacion">Empezar a preparar</button>`;
-  else if (p.estado === 'en_preparacion' && esDeposito && externo) acciones = `<button class="btn primary block" data-estado="recibido">Entregado a los emprendedores · descontar stock</button>`;
-  else if (p.estado === 'en_preparacion' && esDeposito) acciones = `<button class="btn primary block" data-estado="enviado">Marcar como enviado</button>${A.suc(p.origen).tel ? `<a class="btn wa block" target="_blank" rel="noopener" href="${wa(A.suc(p.origen).tel)}">Avisar por WhatsApp al local</a>` : ''}`;
-  else if (p.estado === 'enviado' && esLocal) acciones = `<button class="btn primary block" data-estado="recibido">Confirmar recepción y ajustar stock</button>`;
+  else if (p.estado === 'en_preparacion' && esDeposito) acciones = `<button class="btn primary block" data-estado="enviado">${externo ? 'Listo para retirar' : 'Pedido preparado'}${telWA(p.origen) ? ' · avisar por WhatsApp' : ''}</button>`;
+  else if (p.estado === 'enviado' && esDeposito && externo) acciones = `<button class="btn primary block" data-estado="recibido">Entregado a los emprendedores · descontar stock</button>${telWA(p.origen) ? `<a class="btn wa block" target="_blank" rel="noopener" href="${urlWA(telWA(p.origen), textoListoWA(p))}">Reenviar aviso de listo</a>` : ''}`;
+  else if (p.estado === 'enviado' && esDeposito && !esLocal) acciones = telWA(p.origen) ? `<a class="btn wa block" target="_blank" rel="noopener" href="${urlWA(telWA(p.origen), textoListoWA(p))}">Reenviar aviso de pedido preparado</a>` : '';
+  else if (p.estado === 'enviado' && esLocal && !externo) acciones = `<button class="btn primary block" data-estado="recibido">Confirmar recepción y ajustar stock</button>`;
   else if (p.estado === 'solicitado' && esLocal) acciones = `${A.suc(p.destino).tel ? `<a class="btn wa block" target="_blank" rel="noopener" href="${wa(A.suc(p.destino).tel)}">Avisar por WhatsApp a ${esc(A.suc(p.destino).nombre)}</a>` : ''}<button class="btn ghost block" data-estado="cancelado">Cancelar pedido</button>`;
   return header('Pedido #' + p.numero, 'pedidos') + `<main>
   <div class="card"><div class="row between"><div><div class="t" style="font-weight:600">${esc(A.suc(p.origen).nombre)} ← ${esc(A.suc(p.destino).nombre)}</div><div class="small muted">${p.notas ? esc(p.notas) : 'Sin notas'}</div></div><span class="pill ${c}">${t}</span></div></div>
@@ -902,7 +905,12 @@ document.addEventListener('click', e => {
     const p = S.pedidos.find(x => x.id === UI.params.id);
     document.querySelectorAll('[data-prep]').forEach(i => { const it = p.items.find(x => x.productoId === i.dataset.prep); it.preparada = Math.max(0, +i.value || 0); }); if (d.estado === 'en_preparacion') p.items.forEach(it => { if (it.preparada === undefined) it.preparada = it.pedida; });
     if (d.estado === 'recibido') { document.querySelectorAll('[data-rec]').forEach(i => { const it = p.items.find(x => x.productoId === i.dataset.rec); it.recibida = Math.max(0, +i.value || 0); }); }
-    ocupado(async () => { await A.cambiarEstadoPedido(p, d.estado); commit(d.estado === 'recibido' ? 'Recepción confirmada: stock actualizado en ' + A.suc(p.origen).nombre : ESTADO[d.estado][0]); }, 'Guardando…');
+    const telL = d.estado === 'enviado' ? telWA(p.origen) : ''; let win = null; try { if (telL) win = window.open('', '_blank'); } catch (_) {}
+    ocupado(async () => {
+      try { await A.cambiarEstadoPedido(p, d.estado); } catch (e) { if (win) win.close(); throw e; }
+      if (telL && win) win.location.href = urlWA(telL, textoListoWA(p));
+      commit(d.estado === 'recibido' ? (esExterno(p.origen) ? 'Entregado: stock descontado de ' + A.suc(p.destino).nombre : 'Recepción confirmada: stock actualizado en ' + A.suc(p.origen).nombre) : d.estado === 'enviado' ? (telL ? (win ? 'Listo. Tocá enviar en WhatsApp' : 'Listo. Avisá con el botón de WhatsApp') : 'Pedido marcado como preparado') : ESTADO[d.estado][0]);
+    }, 'Guardando…');
     return;
   }
   if (t.id === 'ocrBtn') { ocupado(leerRemitoFoto, 'Leyendo la foto… puede tardar unos segundos'); return; }
