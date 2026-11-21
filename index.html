@@ -937,7 +937,17 @@ document.addEventListener('click', e => {
     const falta = cerrar && A.suc(dr.sucursalId).tipo === 'local' ? faltanVentas(dr) : null;
     if (falta && !confirm(`Faltan cargar las ventas de Smartfram ${falta.desde ? 'del ' + fmtDateFull(falta.desde) + ' ' : ''}al ${fmtDateFull(falta.hasta)}.\n\nSi cerrás ahora, el desvío va a salir mal y esas ventas ya no se podrán descontar de este período. ¿Cerrar igual?`)) return;
     if (cerrar && !confirm('¿Cerrar el inventario? El stock de ' + A.suc(dr.sucursalId).nombre + ' quedará igual al contado.')) return;
-    ocupado(async () => { const m = await A.guardarInventario(inv, cerrar); toast(cerrar ? 'Inventario cerrado: stock ajustado' : (A.suc(dr.sucursalId).tipo === 'local' && faltanVentas(dr) ? 'Conteo enviado: queda pendiente de las ventas y el cierre' : 'Borrador guardado')); go('inventario-detalle', { id: m.id }); }, 'Guardando inventario…'); return;
+    // aviso por WhatsApp a la administración (config.telAvisoConteo) cuando una heladería carga su conteo
+    const telAv = A.suc(dr.sucursalId).tipo === 'local' && UI.user.rol !== 'administrador' && !dr.borradorId ? String(S.config.telAvisoConteo || '').replace(/\D/g, '') : '';
+    let win = null; try { if (telAv) win = window.open('', '_blank'); } catch (_) {}
+    ocupado(async () => {
+      let m; try { m = await A.guardarInventario(inv, cerrar); } catch (e) { if (win) win.close(); throw e; }
+      if (telAv && win) { let dk = 0, tk = 0; for (const it of m.items) if (A.prod(it.productoId).grupo === 'helado_granel') { dk += it.desvio || 0; tk += it.teorico || 0; }
+        const txt = `*Conteo ${A.suc(m.sucursalId).nombre} · ${fmtDateFull(m.fecha)}*\nCargado por ${UI.user.nombre}.\n` + (cerrar ? `Cerrado. Desvío helado: ${fmtKg(dk)} kg (${tk ? fmtPct(dk / tk * 100) : '—'}).` : `Queda *pendiente*: falta cargar las ventas de Smartfram y cerrarlo.`) + `\nVer en la app: ${location.origin + location.pathname}`;
+        win.location.href = urlWA(telAv, txt); }
+      toast(cerrar ? 'Inventario cerrado: stock ajustado' : (A.suc(dr.sucursalId).tipo === 'local' && faltanVentas(dr) ? 'Conteo enviado: queda pendiente de las ventas y el cierre' : 'Borrador guardado'));
+      go('inventario-detalle', { id: m.id });
+    }, 'Guardando inventario…'); return;
   }
   if (t.id === 'logout') { ocupado(async () => { await A.logout(); go('login'); }); return; }
   if (t.id === 'cambiarPass') { const n = prompt('Nueva contraseña (mínimo 8 caracteres):'); if (!n) return; if (n.length < 8) return toast('Mínimo 8 caracteres'); ocupado(async () => { await A.cambiarPassword(n); toast('Contraseña actualizada'); }, 'Guardando…'); return; }
